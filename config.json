@@ -12,6 +12,19 @@
         "second_trail_profit_threshold": 3.0,
         "blacklist": ["ETH/USDT:USDT","ETH/USDT:USDT"]
     },
+    "Hyperliquid": {
+    "wallet_address": "0x你的钱包地址...",
+    "private_key": "0x你的私钥...",
+    "leverage": 10,
+    "stop_loss_pct": 0.1,
+    "low_trail_stop_loss_pct": 0.2,
+    "trail_stop_loss_pct": 0.18,
+    "higher_trail_stop_loss_pct": 0.25,
+    "low_trail_profit_threshold": 0.5,
+    "first_trail_profit_threshold": 1.0,
+    "second_trail_profit_threshold": 2.0,
+    "blacklist": [""] 
+    },
     "okx": {
         "apiKey": "",
         "secret": "",
@@ -47,6 +60,6 @@
         "second_trail_profit_threshold": 3.0,
         "blacklist": ["ETH-USDT-SWAP"]
     },
-    "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/655821a2",
+    "feishu_webhook": "",
     "monitor_interval": 4
 }
