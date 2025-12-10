@@ -83,8 +83,15 @@ class MultiAssetTradingBot:
     def setup_logger(self):
         self.logger = logging.getLogger("HyperliquidBot")
         self.logger.setLevel(logging.INFO)
-        # 修改日志文件名
-        handler = TimedRotatingFileHandler("hyperliquid_bot.log", when="midnight", interval=1, backupCount=7)
+        
+        # --- 修正：确保 logs 目录存在，并将日志写入该目录 ---
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+            
+        # 修改路径为 "logs/hyperliquid_bot.log"
+        handler = TimedRotatingFileHandler("logs/hyperliquid_bot.log", when="midnight", interval=1, backupCount=7)
+        # ------------------------------------------------
+        
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         console_handler = logging.StreamHandler()
