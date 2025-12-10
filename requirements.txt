@@ -1,2 +1,5 @@
-﻿ccxt==4.4.86
-requests==2.27.1
+requests
+ccxt
+hyperliquid-python-sdk
+eth-account
+eth-utils
