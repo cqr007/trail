@@ -10,9 +10,9 @@
         "low_trail_profit_threshold": 15,
         "first_trail_profit_threshold": 40,
         "second_trail_profit_threshold": 80,
-        "blacklist": ["ETH/USDT:USDT","ETH/USDT:USDT"]
+        "blacklist": []
     },
-    "Hyperliquid": {
+    "hyperliquid": {
     "wallet_address": "0x你的钱包地址...",
     "private_key": "0x你的私钥...",
     "leverage": 20,
