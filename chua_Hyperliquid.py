@@ -5,7 +5,7 @@ import requests
 import json
 import math
 import os
-import socket  # <--- 新增: 引入 socket 库用于设置全局超时
+import socket
 from logging.handlers import TimedRotatingFileHandler
 
 # Hyperliquid 依赖
@@ -16,10 +16,8 @@ from hyperliquid.utils import constants
 
 class MultiAssetTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        # --- 新增: 设置全局网络超时时间为 15 秒 ---
-        # 这能防止网络请求无限期卡死（解决 10分钟日志空白的关键）
+        # 设置全局网络超时时间为 15 秒
         socket.setdefaulttimeout(15)
-        # ----------------------------------------
 
         # 1. 策略参数加载
         self.leverage = float(config.get("leverage", 10))
@@ -44,7 +42,6 @@ class MultiAssetTradingBot:
         # 3. Hyperliquid 连接配置
         self.wallet_address = config["wallet_address"] 
         
-        # 自动处理私钥前缀
         raw_key = config["private_key"]
         if raw_key.startswith("0x"):
             raw_key = raw_key[2:]
@@ -64,9 +61,7 @@ class MultiAssetTradingBot:
                 self.logger.info("✅ 模式确认: 正在使用 Agent 代理操作主钱包。")
             self.logger.info("-" * 40)
             
-            # 默认连接主网
             self.info = Info(constants.MAINNET_API_URL, skip_ws=True)
-            
             self.exchange = Exchange(
                 self.account, 
                 constants.MAINNET_API_URL, 
@@ -100,7 +95,6 @@ class MultiAssetTradingBot:
         if not self.feishu_webhook:
             return
         try:
-            # 这里的 timeout 是 requests 库层面的，双重保险
             payload = {"msg_type": "text", "content": {"text": message}}
             requests.post(self.feishu_webhook, json=payload, timeout=5)
         except Exception as e:
@@ -160,9 +154,10 @@ class MultiAssetTradingBot:
             return active_positions
             
         except Exception as e:
-            # 捕获超时错误，打印日志并返回空，保证主循环不退出
-            self.logger.error(f"❌ 获取数据失败 (可能是网络超时): {e}")
-            return []
+            # --- 关键修改 1: 报错时返回 None，而不是空列表 ---
+            # 这样主循环就知道是“出错”了，而不是“没持仓”
+            self.logger.error(f"❌ 获取数据失败 (保持状态): {e}")
+            return None 
 
     def close_position(self, symbol, size, side, reason=""):
         """平仓函数"""
@@ -204,75 +199,84 @@ class MultiAssetTradingBot:
             try:
                 positions = self.get_positions_and_prices()
                 
-                if not positions:
+                # --- 关键修改 2: 状态保护逻辑 ---
+                if positions is None:
+                    # Case A: 网络出错
+                    # 绝对不要清空 trailing_states！保持现有数据，直接等待下一次重试
+                    self.logger.warning("⚠️ 数据获取失败，暂停判断 (状态已保护)")
+                    
+                elif not positions:
+                    # Case B: 真的没有持仓 (列表为空)
+                    # 只有这时候才清空状态
                     self.trailing_states.clear()
                     
                     if idle_count % 15 == 0:
                         self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
                     idle_count += 1
-                else:
-                    idle_count = 0
                 
-                for pos in positions:
-                    symbol = pos['symbol']
-                    profit_pct = pos['profit_pct']
-                    side = pos['side']
-                    size = pos['size']
-                    
-                    if symbol in self.blacklist:
-                        continue
-
-                    # 更新最高收益率
-                    if symbol not in self.trailing_states:
-                        self.trailing_states[symbol] = profit_pct
-                    else:
-                        if profit_pct > self.trailing_states[symbol]:
-                            self.trailing_states[symbol] = profit_pct
-                    
-                    highest_profit = self.trailing_states[symbol]
-
-                    # 判定档位
-                    current_tier = "未达标"
-                    if highest_profit >= self.second_trail_profit_threshold:
-                        current_tier = "第二档移动止盈"
-                    elif highest_profit >= self.first_trail_profit_threshold:
-                        current_tier = "第一档移动止盈"
-                    elif highest_profit >= self.low_trail_profit_threshold:
-                        current_tier = "低收益回撤保护"
-
-                    # 1. 低收益回撤保护
-                    if current_tier == "低收益回撤保护":
-                        trail_stop_loss = highest_profit * (1 - self.low_trail_stop_loss_pct)
-                        if profit_pct <= trail_stop_loss:
-                            self.close_position(symbol, size, side, 
-                                f"触发低收益保护 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
-                            continue
-
-                    # 2. 第一档移动止盈
-                    elif current_tier == "第一档移动止盈":
-                        trail_stop_loss = highest_profit * (1 - self.trail_stop_loss_pct)
-                        if profit_pct <= trail_stop_loss:
-                            self.close_position(symbol, size, side, 
-                                f"触发第一档移动止盈 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
-                            continue
-
-                    # 3. 第二档移动止盈
-                    elif current_tier == "第二档移动止盈":
-                        trail_stop_loss = highest_profit * (1 - self.higher_trail_stop_loss_pct)
-                        if profit_pct <= trail_stop_loss:
-                            self.close_position(symbol, size, side, 
-                                f"触发第二档移动止盈 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
-                            continue
-
-                    # 4. 硬止损
-                    if profit_pct <= -self.stop_loss_pct:
-                        self.close_position(symbol, size, side, 
-                            f"触发硬止损 (当前: {profit_pct:.2f}%)")
-                        continue
+                else:
+                    # Case C: 有持仓，正常处理
+                    idle_count = 0
+                    for pos in positions:
+                        symbol = pos['symbol']
+                        profit_pct = pos['profit_pct']
+                        side = pos['side']
+                        size = pos['size']
                         
-                    # 打印状态
-                    if profit_pct > 1 or profit_pct < -1:
-                        self.logger.info(f"监控中: {symbol} | 方向: {side} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
+                        if symbol in self.blacklist:
+                            continue
+
+                        # 更新最高收益率
+                        if symbol not in self.trailing_states:
+                            self.trailing_states[symbol] = profit_pct
+                        else:
+                            if profit_pct > self.trailing_states[symbol]:
+                                self.trailing_states[symbol] = profit_pct
+                        
+                        highest_profit = self.trailing_states[symbol]
+
+                        # 判定档位
+                        current_tier = "未达标"
+                        if highest_profit >= self.second_trail_profit_threshold:
+                            current_tier = "第二档移动止盈"
+                        elif highest_profit >= self.first_trail_profit_threshold:
+                            current_tier = "第一档移动止盈"
+                        elif highest_profit >= self.low_trail_profit_threshold:
+                            current_tier = "低收益回撤保护"
+
+                        # 1. 低收益回撤保护
+                        if current_tier == "低收益回撤保护":
+                            trail_stop_loss = highest_profit * (1 - self.low_trail_stop_loss_pct)
+                            if profit_pct <= trail_stop_loss:
+                                self.close_position(symbol, size, side, 
+                                    f"触发低收益保护 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
+                                continue
+
+                        # 2. 第一档移动止盈
+                        elif current_tier == "第一档移动止盈":
+                            trail_stop_loss = highest_profit * (1 - self.trail_stop_loss_pct)
+                            if profit_pct <= trail_stop_loss:
+                                self.close_position(symbol, size, side, 
+                                    f"触发第一档移动止盈 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
+                                continue
+
+                        # 3. 第二档移动止盈
+                        elif current_tier == "第二档移动止盈":
+                            trail_stop_loss = highest_profit * (1 - self.higher_trail_stop_loss_pct)
+                            if profit_pct <= trail_stop_loss:
+                                self.close_position(symbol, size, side, 
+                                    f"触发第二档移动止盈 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
+                                continue
+
+                        # 4. 硬止损
+                        if profit_pct <= -self.stop_loss_pct:
+                            self.close_position(symbol, size, side, 
+                                f"触发硬止损 (当前: {profit_pct:.2f}%)")
+                            continue
+                            
+                        # 打印状态
+                        if profit_pct > 1 or profit_pct < -1:
+                            self.logger.info(f"监控中: {symbol} | 方向: {side} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
 
             except Exception as e:
                 self.logger.error(f"监控循环发生错误: {e}")
