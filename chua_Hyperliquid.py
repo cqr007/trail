@@ -206,6 +206,8 @@ class MultiAssetTradingBot:
             t.start()
             self.watchdog_started = True
 
+        idle_count = 0
+        
         while True:
             self.last_heartbeat = time.time()
             cycle_start_time = time.time()
@@ -214,16 +216,19 @@ class MultiAssetTradingBot:
                 positions = self.get_positions_and_prices()
                 
                 if positions is None:
-                    # 网络错误，日志已在 get_positions_and_prices 中打印
+                    # 网络故障：静默等待
                     self.logger.warning("⚠️ 数据获取失败，暂停判断 (状态已保护)")
                     
                 elif not positions:
-                    # 无持仓，强制打印
+                    # 场景 1：无持仓 -> 保持静默，每60秒心跳
                     self.trailing_states.clear()
-                    self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
+                    if idle_count % 15 == 0:
+                        self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
+                    idle_count += 1
                 
                 else:
-                    # 有持仓，强制打印每一轮的状态
+                    # 场景 2：有持仓 -> 无论波动大小，每4秒强制打印
+                    idle_count = 0
                     for pos in positions:
                         symbol = pos['symbol']
                         profit_pct = pos['profit_pct']
@@ -275,7 +280,7 @@ class MultiAssetTradingBot:
                                 f"触发硬止损 (当前: {profit_pct:.2f}%)")
                             continue
                             
-                        # --- 修改：强制打印日志，移除所有条件限制 ---
+                        # --- 修改：只要有持仓，强制打印每一条日志 ---
                         self.logger.info(f"监控中: {symbol} | 方向: {side} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
 
             except Exception as e:
