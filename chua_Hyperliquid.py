@@ -197,12 +197,24 @@ class MultiAssetTradingBot:
         """核心监控循环"""
         self.logger.info(f"🚀 启动监控 (间隔: {self.monitor_interval}s)...")
         
+        # --- 新增: 空闲计数器，用于在无持仓时打印心跳日志 ---
+        idle_count = 0
+        
         while True:
             try:
                 positions = self.get_positions_and_prices()
                 
                 if not positions:
                     self.trailing_states.clear()
+                    
+                    # --- 新增: 心跳检测逻辑 ---
+                    # 避免日志刷屏，每 15 个周期（约 60 秒）打印一次存活状态
+                    if idle_count % 15 == 0:
+                        self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
+                    idle_count += 1
+                else:
+                    # --- 新增: 有持仓时重置计数器 ---
+                    idle_count = 0
                 
                 for pos in positions:
                     symbol = pos['symbol']
