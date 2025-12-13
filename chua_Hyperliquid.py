@@ -6,6 +6,7 @@ import json
 import math
 import os
 import socket
+import threading  # <--- 新增: 引入线程库
 from logging.handlers import TimedRotatingFileHandler
 
 # Hyperliquid 依赖
@@ -39,7 +40,11 @@ class MultiAssetTradingBot:
         # 2. 初始化日志
         self.setup_logger()
 
-        # 3. Hyperliquid 连接配置
+        # 3. 看门狗相关变量
+        self.last_heartbeat = time.time() # 上次心跳时间
+        self.watchdog_started = False
+
+        # 4. Hyperliquid 连接配置
         self.wallet_address = config["wallet_address"] 
         
         raw_key = config["private_key"]
@@ -91,6 +96,20 @@ class MultiAssetTradingBot:
         self.logger.addHandler(handler)
         self.logger.addHandler(console_handler)
 
+    # --- 新增: 看门狗线程函数 ---
+    def _watchdog_loop(self):
+        self.logger.info("🐕 看门狗线程已启动 (超时阈值: 60秒)")
+        while True:
+            time.sleep(5) # 每5秒检查一次
+            gap = time.time() - self.last_heartbeat
+            
+            # 如果超过 60 秒没有更新心跳，说明主程序卡死了
+            if gap > 60:
+                self.logger.error(f"💀 检测到主程序卡死 (已阻塞 {gap:.1f} 秒)，正在强制重启...")
+                # 强制杀掉进程，Docker 会自动重启它
+                os._exit(1)
+    # ---------------------------
+
     def send_feishu_alert(self, message):
         if not self.feishu_webhook:
             return
@@ -104,12 +123,9 @@ class MultiAssetTradingBot:
         """获取当前持仓和所有币种的最新价格"""
         t_start = time.time() 
         try:
-            # 获取用户状态
             user_state = self.info.user_state(self.wallet_address)
-            # 获取全市场价格
             all_mids = self.info.all_mids()
             
-            # 计算耗时
             api_duration = time.time() - t_start
             if api_duration > 2.0:
                 self.logger.warning(f"⚠️ 网络请求耗时过长: {api_duration:.2f}秒")
@@ -154,13 +170,10 @@ class MultiAssetTradingBot:
             return active_positions
             
         except Exception as e:
-            # --- 关键修改 1: 报错时返回 None，而不是空列表 ---
-            # 这样主循环就知道是“出错”了，而不是“没持仓”
             self.logger.error(f"❌ 获取数据失败 (保持状态): {e}")
             return None 
 
     def close_position(self, symbol, size, side, reason=""):
-        """平仓函数"""
         try:
             self.logger.info(f"正在平仓 {symbol}: 数量 {size}, 方向 {side} ({reason})")
             
@@ -191,31 +204,36 @@ class MultiAssetTradingBot:
         """核心监控循环"""
         self.logger.info(f"🚀 启动监控 (目标间隔: {self.monitor_interval}s, 超时限制: 15s)...")
         
+        # --- 启动看门狗 ---
+        if not self.watchdog_started:
+            t = threading.Thread(target=self._watchdog_loop, daemon=True)
+            t.start()
+            self.watchdog_started = True
+        # -----------------
+
         idle_count = 0
         
         while True:
+            # --- 喂狗：更新最后活动时间 ---
+            self.last_heartbeat = time.time()
+            # ---------------------------
+            
             cycle_start_time = time.time()
 
             try:
                 positions = self.get_positions_and_prices()
                 
-                # --- 关键修改 2: 状态保护逻辑 ---
                 if positions is None:
-                    # Case A: 网络出错
-                    # 绝对不要清空 trailing_states！保持现有数据，直接等待下一次重试
+                    # 保持状态，不做任何处理
                     self.logger.warning("⚠️ 数据获取失败，暂停判断 (状态已保护)")
                     
                 elif not positions:
-                    # Case B: 真的没有持仓 (列表为空)
-                    # 只有这时候才清空状态
                     self.trailing_states.clear()
-                    
                     if idle_count % 15 == 0:
                         self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
                     idle_count += 1
                 
                 else:
-                    # Case C: 有持仓，正常处理
                     idle_count = 0
                     for pos in positions:
                         symbol = pos['symbol']
@@ -226,7 +244,6 @@ class MultiAssetTradingBot:
                         if symbol in self.blacklist:
                             continue
 
-                        # 更新最高收益率
                         if symbol not in self.trailing_states:
                             self.trailing_states[symbol] = profit_pct
                         else:
@@ -235,7 +252,6 @@ class MultiAssetTradingBot:
                         
                         highest_profit = self.trailing_states[symbol]
 
-                        # 判定档位
                         current_tier = "未达标"
                         if highest_profit >= self.second_trail_profit_threshold:
                             current_tier = "第二档移动止盈"
@@ -244,7 +260,6 @@ class MultiAssetTradingBot:
                         elif highest_profit >= self.low_trail_profit_threshold:
                             current_tier = "低收益回撤保护"
 
-                        # 1. 低收益回撤保护
                         if current_tier == "低收益回撤保护":
                             trail_stop_loss = highest_profit * (1 - self.low_trail_stop_loss_pct)
                             if profit_pct <= trail_stop_loss:
@@ -252,7 +267,6 @@ class MultiAssetTradingBot:
                                     f"触发低收益保护 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
                                 continue
 
-                        # 2. 第一档移动止盈
                         elif current_tier == "第一档移动止盈":
                             trail_stop_loss = highest_profit * (1 - self.trail_stop_loss_pct)
                             if profit_pct <= trail_stop_loss:
@@ -260,7 +274,6 @@ class MultiAssetTradingBot:
                                     f"触发第一档移动止盈 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
                                 continue
 
-                        # 3. 第二档移动止盈
                         elif current_tier == "第二档移动止盈":
                             trail_stop_loss = highest_profit * (1 - self.higher_trail_stop_loss_pct)
                             if profit_pct <= trail_stop_loss:
@@ -268,20 +281,20 @@ class MultiAssetTradingBot:
                                     f"触发第二档移动止盈 (最高: {highest_profit:.2f}%, 当前: {profit_pct:.2f}%)")
                                 continue
 
-                        # 4. 硬止损
                         if profit_pct <= -self.stop_loss_pct:
                             self.close_position(symbol, size, side, 
                                 f"触发硬止损 (当前: {profit_pct:.2f}%)")
                             continue
                             
-                        # 打印状态
                         if profit_pct > 1 or profit_pct < -1:
                             self.logger.info(f"监控中: {symbol} | 方向: {side} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
 
             except Exception as e:
                 self.logger.error(f"监控循环发生错误: {e}")
             
-            # --- 动态计算睡眠时间 ---
+            # 喂狗：确保 sleep 前也更新一次，防止 sleep 时间过长误判（虽然有动态睡眠）
+            self.last_heartbeat = time.time()
+
             elapsed = time.time() - cycle_start_time 
             sleep_time = self.monitor_interval - elapsed
             
@@ -289,7 +302,6 @@ class MultiAssetTradingBot:
                 time.sleep(sleep_time) 
             else:
                 self.logger.warning(f"⚡ 本轮耗时 ({elapsed:.2f}s) 超过设定间隔，跳过睡眠")
-            # -----------------------
 
 if __name__ == '__main__':
     try:
