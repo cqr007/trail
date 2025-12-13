@@ -6,7 +6,7 @@ import json
 import math
 import os
 import socket
-import threading  # <--- 新增: 引入线程库
+import threading
 from logging.handlers import TimedRotatingFileHandler
 
 # Hyperliquid 依赖
@@ -96,17 +96,15 @@ class MultiAssetTradingBot:
         self.logger.addHandler(handler)
         self.logger.addHandler(console_handler)
 
-    # --- 新增: 看门狗线程函数 ---
+    # --- 看门狗线程函数 ---
     def _watchdog_loop(self):
         self.logger.info("🐕 看门狗线程已启动 (超时阈值: 60秒)")
         while True:
-            time.sleep(5) # 每5秒检查一次
+            time.sleep(5)
             gap = time.time() - self.last_heartbeat
             
-            # 如果超过 60 秒没有更新心跳，说明主程序卡死了
             if gap > 60:
                 self.logger.error(f"💀 检测到主程序卡死 (已阻塞 {gap:.1f} 秒)，正在强制重启...")
-                # 强制杀掉进程，Docker 会自动重启它
                 os._exit(1)
     # ---------------------------
 
@@ -120,7 +118,6 @@ class MultiAssetTradingBot:
             self.logger.error(f"飞书报警发送失败: {e}")
 
     def get_positions_and_prices(self):
-        """获取当前持仓和所有币种的最新价格"""
         t_start = time.time() 
         try:
             user_state = self.info.user_state(self.wallet_address)
@@ -204,37 +201,29 @@ class MultiAssetTradingBot:
         """核心监控循环"""
         self.logger.info(f"🚀 启动监控 (目标间隔: {self.monitor_interval}s, 超时限制: 15s)...")
         
-        # --- 启动看门狗 ---
         if not self.watchdog_started:
             t = threading.Thread(target=self._watchdog_loop, daemon=True)
             t.start()
             self.watchdog_started = True
-        # -----------------
 
-        idle_count = 0
-        
         while True:
-            # --- 喂狗：更新最后活动时间 ---
             self.last_heartbeat = time.time()
-            # ---------------------------
-            
             cycle_start_time = time.time()
 
             try:
                 positions = self.get_positions_and_prices()
                 
                 if positions is None:
-                    # 保持状态，不做任何处理
+                    # 网络错误，日志已在 get_positions_and_prices 中打印
                     self.logger.warning("⚠️ 数据获取失败，暂停判断 (状态已保护)")
                     
                 elif not positions:
+                    # 无持仓，强制打印
                     self.trailing_states.clear()
-                    if idle_count % 15 == 0:
-                        self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
-                    idle_count += 1
+                    self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
                 
                 else:
-                    idle_count = 0
+                    # 有持仓，强制打印每一轮的状态
                     for pos in positions:
                         symbol = pos['symbol']
                         profit_pct = pos['profit_pct']
@@ -286,13 +275,12 @@ class MultiAssetTradingBot:
                                 f"触发硬止损 (当前: {profit_pct:.2f}%)")
                             continue
                             
-                        if profit_pct > 1 or profit_pct < -1:
-                            self.logger.info(f"监控中: {symbol} | 方向: {side} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
+                        # --- 修改：强制打印日志，移除所有条件限制 ---
+                        self.logger.info(f"监控中: {symbol} | 方向: {side} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
 
             except Exception as e:
                 self.logger.error(f"监控循环发生错误: {e}")
             
-            # 喂狗：确保 sleep 前也更新一次，防止 sleep 时间过长误判（虽然有动态睡眠）
             self.last_heartbeat = time.time()
 
             elapsed = time.time() - cycle_start_time 
