@@ -110,14 +110,21 @@ class MultiAssetTradingBot:
 
     def get_positions_and_prices(self):
         """获取当前持仓和所有币种的最新价格"""
+        t_start = time.time() # <--- 开始计时
         try:
-            # 获取用户状态（包含持仓）
-            # 注意：查询的是主钱包地址 self.wallet_address
+            # 获取用户状态
             user_state = self.info.user_state(self.wallet_address)
-            positions_raw = user_state.get('assetPositions', [])
-            
-            # 获取全市场中间价
+            # 获取全市场价格
             all_mids = self.info.all_mids()
+            
+            # <--- 计算并打印 API 耗时 ---
+            api_duration = time.time() - t_start
+            if api_duration > 2.0:
+                self.logger.warning(f"⚠️ 网络请求耗时过长: {api_duration:.2f}秒")
+            # ---------------------------
+
+            positions_raw = user_state.get('assetPositions', [])
+            # ... (后续代码保持不变) ...
             
             active_positions = []
             
@@ -195,25 +202,27 @@ class MultiAssetTradingBot:
 
     def trail(self):
         """核心监控循环"""
-        self.logger.info(f"🚀 启动监控 (间隔: {self.monitor_interval}s)...")
+        self.logger.info(f"🚀 启动监控 (目标间隔: {self.monitor_interval}s)...")
         
-        # --- 新增: 空闲计数器，用于在无持仓时打印心跳日志 ---
+        # 空闲计数器，用于在无持仓时打印心跳日志
         idle_count = 0
         
         while True:
+            cycle_start_time = time.time() # <--- 记录循环开始时间 (方法三)
+
             try:
                 positions = self.get_positions_and_prices()
                 
                 if not positions:
                     self.trailing_states.clear()
                     
-                    # --- 新增: 心跳检测逻辑 ---
+                    # 心跳检测逻辑
                     # 避免日志刷屏，每 15 个周期（约 60 秒）打印一次存活状态
                     if idle_count % 15 == 0:
                         self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
                     idle_count += 1
                 else:
-                    # --- 新增: 有持仓时重置计数器 ---
+                    # 有持仓时重置计数器
                     idle_count = 0
                 
                 for pos in positions:
@@ -280,7 +289,15 @@ class MultiAssetTradingBot:
             except Exception as e:
                 self.logger.error(f"监控循环发生错误: {e}")
             
-            time.sleep(self.monitor_interval)
+            # --- 动态计算睡眠时间 (方法三) ---
+            elapsed = time.time() - cycle_start_time # 本次循环消耗了多少时间
+            sleep_time = self.monitor_interval - elapsed
+            
+            if sleep_time > 0:
+                time.sleep(sleep_time) # 只需要睡剩下的时间
+            else:
+                self.logger.warning(f"⚡ 本轮处理过慢 ({elapsed:.2f}s)，跳过睡眠直接开始下一轮")
+            # -----------------------
 
 if __name__ == '__main__':
     try:
