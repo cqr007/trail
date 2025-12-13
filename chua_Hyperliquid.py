@@ -5,6 +5,7 @@ import requests
 import json
 import math
 import os
+import socket  # <--- 新增: 引入 socket 库用于设置全局超时
 from logging.handlers import TimedRotatingFileHandler
 
 # Hyperliquid 依赖
@@ -15,6 +16,11 @@ from hyperliquid.utils import constants
 
 class MultiAssetTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
+        # --- 新增: 设置全局网络超时时间为 15 秒 ---
+        # 这能防止网络请求无限期卡死（解决 10分钟日志空白的关键）
+        socket.setdefaulttimeout(15)
+        # ----------------------------------------
+
         # 1. 策略参数加载
         self.leverage = float(config.get("leverage", 10))
         self.stop_loss_pct = config["stop_loss_pct"]
@@ -36,7 +42,7 @@ class MultiAssetTradingBot:
         self.setup_logger()
 
         # 3. Hyperliquid 连接配置
-        self.wallet_address = config["wallet_address"] # 这是你的主账户地址（有钱的那个）
+        self.wallet_address = config["wallet_address"] 
         
         # 自动处理私钥前缀
         raw_key = config["private_key"]
@@ -45,11 +51,9 @@ class MultiAssetTradingBot:
         self.private_key = raw_key
         
         try:
-            # --- 关键修复 1: 正确初始化账户 ---
             self.account = Account.from_key(self.private_key)
             agent_address = self.account.address
             
-            # --- 关键修复 2: 明确打印身份关系，防止操作错账户 ---
             self.logger.info("-" * 40)
             self.logger.info(f"🔑 API Agent 地址: {agent_address}")
             self.logger.info(f"🏦 目标主钱包地址: {self.wallet_address}")
@@ -63,9 +67,6 @@ class MultiAssetTradingBot:
             # 默认连接主网
             self.info = Info(constants.MAINNET_API_URL, skip_ws=True)
             
-            # --- 关键修复 3: 绑定主钱包地址 ---
-            # account_address 必须填 self.wallet_address (主钱包)
-            # 否则 Agent 会去操作它自己的空账户
             self.exchange = Exchange(
                 self.account, 
                 constants.MAINNET_API_URL, 
@@ -77,21 +78,17 @@ class MultiAssetTradingBot:
             self.logger.error(f"❌ Hyperliquid 连接初始化失败: {e}")
             raise e
 
-        # 用于存储每个币种的最高收益率状态 { "BTC": 25.5, ... }
+        # 用于存储每个币种的最高收益率状态
         self.trailing_states = {}
 
     def setup_logger(self):
         self.logger = logging.getLogger("HyperliquidBot")
         self.logger.setLevel(logging.INFO)
         
-        # --- 修正：确保 logs 目录存在，并将日志写入该目录 ---
         if not os.path.exists("logs"):
             os.makedirs("logs")
             
-        # 修改路径为 "logs/hyperliquid_bot.log"
         handler = TimedRotatingFileHandler("logs/hyperliquid_bot.log", when="midnight", interval=1, backupCount=7)
-        # ------------------------------------------------
-        
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         console_handler = logging.StreamHandler()
@@ -103,6 +100,7 @@ class MultiAssetTradingBot:
         if not self.feishu_webhook:
             return
         try:
+            # 这里的 timeout 是 requests 库层面的，双重保险
             payload = {"msg_type": "text", "content": {"text": message}}
             requests.post(self.feishu_webhook, json=payload, timeout=5)
         except Exception as e:
@@ -110,22 +108,19 @@ class MultiAssetTradingBot:
 
     def get_positions_and_prices(self):
         """获取当前持仓和所有币种的最新价格"""
-        t_start = time.time() # <--- 开始计时
+        t_start = time.time() 
         try:
             # 获取用户状态
             user_state = self.info.user_state(self.wallet_address)
             # 获取全市场价格
             all_mids = self.info.all_mids()
             
-            # <--- 计算并打印 API 耗时 ---
+            # 计算耗时
             api_duration = time.time() - t_start
             if api_duration > 2.0:
                 self.logger.warning(f"⚠️ 网络请求耗时过长: {api_duration:.2f}秒")
-            # ---------------------------
 
             positions_raw = user_state.get('assetPositions', [])
-            # ... (后续代码保持不变) ...
-            
             active_positions = []
             
             for item in positions_raw:
@@ -139,15 +134,12 @@ class MultiAssetTradingBot:
                 entry_price = float(pos['entryPx'])
                 unrealized_pnl_val = float(pos['unrealizedPnl'])
                 
-                # 获取当前价格
                 current_price = float(all_mids.get(coin, 0))
                 if current_price == 0:
                     continue
 
-                # 计算方向
                 side = "LONG" if size > 0 else "SHORT"
                 
-                # 手动计算盈亏百分比
                 margin = (abs(size) * entry_price) / self.leverage
                 if margin > 0:
                     profit_pct = (unrealized_pnl_val / margin) * 100
@@ -168,7 +160,8 @@ class MultiAssetTradingBot:
             return active_positions
             
         except Exception as e:
-            self.logger.error(f"获取持仓或价格失败: {e}")
+            # 捕获超时错误，打印日志并返回空，保证主循环不退出
+            self.logger.error(f"❌ 获取数据失败 (可能是网络超时): {e}")
             return []
 
     def close_position(self, symbol, size, side, reason=""):
@@ -178,12 +171,11 @@ class MultiAssetTradingBot:
             
             is_buy = True if side == "SHORT" else False
             
-            # 发送市价单平仓
             result = self.exchange.market_open(
                 name=symbol,
                 is_buy=is_buy,
                 sz=size,
-                slippage=0.02 # 2% 滑点保护
+                slippage=0.02
             )
             
             if result['status'] == 'ok':
@@ -202,13 +194,12 @@ class MultiAssetTradingBot:
 
     def trail(self):
         """核心监控循环"""
-        self.logger.info(f"🚀 启动监控 (目标间隔: {self.monitor_interval}s)...")
+        self.logger.info(f"🚀 启动监控 (目标间隔: {self.monitor_interval}s, 超时限制: 15s)...")
         
-        # 空闲计数器，用于在无持仓时打印心跳日志
         idle_count = 0
         
         while True:
-            cycle_start_time = time.time() # <--- 记录循环开始时间 (方法三)
+            cycle_start_time = time.time()
 
             try:
                 positions = self.get_positions_and_prices()
@@ -216,13 +207,10 @@ class MultiAssetTradingBot:
                 if not positions:
                     self.trailing_states.clear()
                     
-                    # 心跳检测逻辑
-                    # 避免日志刷屏，每 15 个周期（约 60 秒）打印一次存活状态
                     if idle_count % 15 == 0:
                         self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
                     idle_count += 1
                 else:
-                    # 有持仓时重置计数器
                     idle_count = 0
                 
                 for pos in positions:
@@ -289,19 +277,18 @@ class MultiAssetTradingBot:
             except Exception as e:
                 self.logger.error(f"监控循环发生错误: {e}")
             
-            # --- 动态计算睡眠时间 (方法三) ---
-            elapsed = time.time() - cycle_start_time # 本次循环消耗了多少时间
+            # --- 动态计算睡眠时间 ---
+            elapsed = time.time() - cycle_start_time 
             sleep_time = self.monitor_interval - elapsed
             
             if sleep_time > 0:
-                time.sleep(sleep_time) # 只需要睡剩下的时间
+                time.sleep(sleep_time) 
             else:
-                self.logger.warning(f"⚡ 本轮处理过慢 ({elapsed:.2f}s)，跳过睡眠直接开始下一轮")
+                self.logger.warning(f"⚡ 本轮耗时 ({elapsed:.2f}s) 超过设定间隔，跳过睡眠")
             # -----------------------
 
 if __name__ == '__main__':
     try:
-        # 强制切换工作目录，解决 PM2 找不到文件的问题
         import os
         os.chdir(os.path.dirname(os.path.abspath(__file__)))
         print(f"当前工作目录: {os.getcwd()}")
@@ -309,7 +296,6 @@ if __name__ == '__main__':
         with open('config.json', 'r') as f:
             all_config = json.load(f)
             
-        # 智能读取配置：优先读取嵌套的 Hyperliquid 配置
         if 'hyperliquid' in all_config:
             print("💡 正在加载 config.json 中的 [hyperliquid] 配置块...")
             bot_config = all_config['hyperliquid']
@@ -318,14 +304,12 @@ if __name__ == '__main__':
             bot = MultiAssetTradingBot(bot_config, feishu_webhook=feishu_url)
             bot.trail()
         else:
-            # 兼容扁平化配置
             if 'stop_loss_pct' in all_config:
                 print("💡 正在加载扁平化配置...")
                 bot = MultiAssetTradingBot(all_config)
                 bot.trail()
             else:
                 print("❌ 致命错误: config.json 中找不到 'hyperliquid' 配置块")
-                print(f"当前可用键值: {list(all_config.keys())}")
             
     except FileNotFoundError:
         print("❌ 错误: 找不到 config.json 文件")
