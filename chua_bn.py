@@ -65,10 +65,16 @@ class BinanceTradingBot:
 
             self.exchange = ccxt.binance(exchange_config)
             
+            # --- [新增] 开启测试网模式 (Sandbox Mode) ---
+            # 这会自动将 API 接口切换到 testnet.binancefuture.com
+            self.exchange.set_sandbox_mode(True)
+            self.logger.warning("⚠️⚠️⚠️ 已启用币安测试网 (Sandbox Mode) - 请确保 config.json 使用测试网 API Key ⚠️⚠️⚠️")
+            # ----------------------------------------
+            
             # 预加载市场信息（用于精度计算）
             self.logger.info("⏳ 正在加载币安市场信息...")
             self.exchange.load_markets()
-            self.logger.info("✅ 币安交易连接建立成功")
+            self.logger.info("✅ 币安交易连接建立成功 (测试网)")
             
         except Exception as e:
             self.logger.error(f"❌ 币安连接初始化失败: {e}")
