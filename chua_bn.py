@@ -59,7 +59,8 @@ class BinanceTradingBot:
                     'adjustForTimeDifference': True,
                 },
                 'has': {
-                    'fetchCurrencies': False, # 禁用币种获取
+                    'fetchCurrencies': False, 
+                    'fetchMarginPairs': False, # 显式声明不支持
                 },
                 # ✅ 强制所有 URL 指向合约测试网
                 'urls': {
@@ -69,7 +70,7 @@ class BinanceTradingBot:
                         'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                        'sapi': 'https://testnet.binancefuture.com/fapi/v1', # 故意指错，下面会屏蔽
+                        'sapi': 'https://testnet.binancefuture.com/fapi/v1', # 必须指错，然后屏蔽
                     },
                 }
             }
@@ -79,28 +80,28 @@ class BinanceTradingBot:
 
             self.exchange = ccxt.binance(exchange_config)
             
-            # 🔥🔥🔥 【核心修复：Monkey Patch】 🔥🔥🔥
-            # 直接在对象实例上，把会导致报错的 API 方法替换成“哑巴方法”
-            # 这样 ccxt 内部调用 self.sapiGetMarginAllPairs() 时，就不会联网，而是直接拿到 []
+            # 🔥🔥🔥 【核心修复：Monkey Patch 全家桶】 🔥🔥🔥
+            # 我们要把 ccxt 初始化时所有可能调用的 sapi (现货/杠杆) 接口全屏蔽掉
             
-            self.logger.info("🛠️ 正在应用 API 屏蔽补丁，禁止调用 margin/allPairs...")
+            self.logger.info("🛠️ 正在应用 API 屏蔽补丁 (屏蔽 Margin/Isolated/Capital)...")
             
-            # 屏蔽 sapiGetMarginAllPairs (camelCase)
+            # 定义一个返回空列表的哑巴函数
+            dummy_list = lambda *args, **kwargs: []
+            dummy_dict = lambda *args, **kwargs: {}
+
+            # 1. 屏蔽 全仓杠杆 交易对 (你上一次遇到的错误)
             if hasattr(self.exchange, 'sapiGetMarginAllPairs'):
-                 self.exchange.sapiGetMarginAllPairs = lambda *args, **kwargs: []
-            else:
-                # 某些旧版本 ccxt 可能是这个名字，为了保险起见强制赋值
-                self.exchange.sapiGetMarginAllPairs = lambda *args, **kwargs: []
+                 self.exchange.sapiGetMarginAllPairs = dummy_list
+            self.exchange.sapi_get_margin_allpairs = dummy_list
 
-            # 屏蔽 sapi_get_margin_allpairs (snake_case)
-            if hasattr(self.exchange, 'sapi_get_margin_allpairs'):
-                self.exchange.sapi_get_margin_allpairs = lambda *args, **kwargs: []
-            else:
-                self.exchange.sapi_get_margin_allpairs = lambda *args, **kwargs: []
+            # 2. ✅✅✅ 屏蔽 逐仓杠杆 交易对 (你刚刚遇到的错误 /margin/isolated/allPairs) ✅✅✅
+            if hasattr(self.exchange, 'sapiGetMarginIsolatedAllPairs'):
+                self.exchange.sapiGetMarginIsolatedAllPairs = dummy_list
+            self.exchange.sapi_get_margin_isolated_allpairs = dummy_list
 
-            # 屏蔽 sapiGetCapitalConfigGetall (获取所有币种配置的现货接口)
-            self.exchange.sapiGetCapitalConfigGetall = lambda *args, **kwargs: []
-            self.exchange.sapi_get_capital_config_getall = lambda *args, **kwargs: []
+            # 3. 屏蔽 现货资产配置
+            self.exchange.sapiGetCapitalConfigGetall = dummy_list
+            self.exchange.sapi_get_capital_config_getall = dummy_list
 
             self.logger.warning("⚠️⚠️⚠️ 已强制运行在：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
             
