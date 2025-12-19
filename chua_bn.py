@@ -12,16 +12,49 @@ from logging.handlers import TimedRotatingFileHandler
 # 币安依赖
 import ccxt
 
+# ==========================================
+# 🔥 终局之战：BinanceTestnetFix
+# 彻底拦截 ccxt 所有“多余”的市场查询请求
+# ==========================================
+class BinanceTestnetFix(ccxt.binance):
+    def describe(self):
+        config = super().describe()
+        # 1. 强制锁死 URL 到合约测试网 (U本位)
+        testnet_url = 'https://testnet.binancefuture.com/fapi/v1'
+        config['urls']['api'] = {
+            'public': testnet_url,
+            'private': testnet_url,
+            'fapiPublic': testnet_url,
+            'fapiPrivate': testnet_url,
+            'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+            'sapi': testnet_url, 
+            'dapiPublic': testnet_url, 
+            'dapiPrivate': testnet_url,
+            'eapiPublic': testnet_url, 
+            'eapiPrivate': testnet_url,
+        }
+        config['has']['fetchCurrencies'] = False
+        config['has']['fetchMarginPairs'] = False
+        config['options']['fetchMarginPairs'] = False
+        return config
+
+    # 拦截所有杂项接口
+    def sapiGetMarginAllPairs(self, params={}): return []
+    def sapiGetMarginIsolatedAllPairs(self, params={}): return []
+    def sapiGetCapitalConfigGetall(self, params={}): return []
+    def dapiPublicGetExchangeInfo(self, params={}):
+        return {'symbols': [], 'timezone': 'UTC', 'serverTime': 0, 'rateLimits': [], 'exchangeFilters': []}
+    def eapiPublicGetExchangeInfo(self, params={}):
+        return {'symbols': [], 'timezone': 'UTC', 'serverTime': 0, 'rateLimits': [], 'exchangeFilters': []}
+
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        # 设置全局网络超时时间 (30秒)
-        socket.setdefaulttimeout(30)
+        socket.setdefaulttimeout(30) # 30秒超时
 
         # 1. 策略参数加载
         self.leverage = float(config.get("leverage", 20)) 
         self.stop_loss_pct = config["stop_loss_pct"]
         
-        # 移动止盈参数
         self.low_trail_stop_loss_pct = config["low_trail_stop_loss_pct"]
         self.trail_stop_loss_pct = config["trail_stop_loss_pct"]
         self.higher_trail_stop_loss_pct = config["higher_trail_stop_loss_pct"]
@@ -30,7 +63,6 @@ class BinanceTradingBot:
         self.first_trail_profit_threshold = config["first_trail_profit_threshold"]
         self.second_trail_profit_threshold = config["second_trail_profit_threshold"]
 
-        # 部分平仓比例配置
         self.hard_stop_close_ratio = config.get("hard_stop_close_ratio", 1.0)
         self.low_trail_close_ratio = config.get("low_trail_close_ratio", 1.0)
         self.first_trail_close_ratio = config.get("first_trail_close_ratio", 1.0)
@@ -47,6 +79,9 @@ class BinanceTradingBot:
         self.last_heartbeat = time.time()
         self.watchdog_started = False
 
+        # --- 网络自检 ---
+        self.check_proxy_connection(config.get("proxies"))
+
         # 4. 币安连接配置
         try:
             exchange_config = {
@@ -57,79 +92,36 @@ class BinanceTradingBot:
                 'options': {
                     'defaultType': 'future',
                     'adjustForTimeDifference': True,
-                },
-                # 显式禁用部分功能
-                'has': {
-                    'fetchCurrencies': False, 
-                    'fetchMarginPairs': False,
-                },
-                # ✅ 强制所有 API 路径都指向 U本位合约测试网
-                'urls': {
-                    'api': {
-                        'public': 'https://testnet.binancefuture.com/fapi/v1',
-                        'private': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                        
-                        # 把这些无关的接口也全部强指到这里，防止报错找不到 URL
-                        'sapi': 'https://testnet.binancefuture.com/fapi/v1',
-                        'dapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-                        'dapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-                        'eapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-                        'eapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-                    },
                 }
             }
-            # 如果配置了代理
             if "proxies" in config:
                 exchange_config['proxies'] = config['proxies']
 
-            # 初始化标准 ccxt 对象
-            self.exchange = ccxt.binance(exchange_config)
+            # 使用修复版适配器
+            self.exchange = BinanceTestnetFix(exchange_config)
             
-            # 🔥🔥🔥 【手术级修复：实例方法强行覆盖】 🔥🔥🔥
-            # 这是 Python 中优先级最高的操作。我们直接把对象里的方法换成“假方法”。
-            # 无论 ccxt 内部逻辑如何，调用这些方法时，都会立即返回空数据，绝不联网。
-            
-            self.logger.info("🛠️ 正在执行 API 手术 (Instance Method Override)...")
-
-            # 1. 定义假数据返回函数
+            # 手术级修复 (Double Check)
             empty_list = lambda *args, **kwargs: []
-            # 对于 dapi/eapi，ccxt 期待返回一个包含 'symbols' 的字典，否则会解析报错
-            empty_market_struct = lambda *args, **kwargs: {
-                'symbols': [], 
-                'timezone': 'UTC', 
-                'serverTime': 0, 
-                'rateLimits': [], 
-                'exchangeFilters': []
-            }
-
-            # 2. 覆盖 现货/杠杆 相关接口 (sapi)
+            empty_struct = lambda *args, **kwargs: {'symbols': [], 'timezone': 'UTC', 'serverTime': 0, 'rateLimits': [], 'exchangeFilters': []}
+            
             self.exchange.sapiGetMarginAllPairs = empty_list
             self.exchange.sapiGetMarginIsolatedAllPairs = empty_list
             self.exchange.sapiGetCapitalConfigGetall = empty_list
-            
-            # 3. 覆盖 币本位合约 相关接口 (dapi - 你刚才报错的那个)
-            self.exchange.dapiPublicGetExchangeInfo = empty_market_struct
-            
-            # 4. 覆盖 期权 相关接口 (eapi - 预防性覆盖)
-            self.exchange.eapiPublicGetExchangeInfo = empty_market_struct
+            self.exchange.dapiPublicGetExchangeInfo = empty_struct
+            self.exchange.eapiPublicGetExchangeInfo = empty_struct
 
             self.logger.warning("⚠️⚠️⚠️ 已强制运行在：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
             
-            # 预加载市场信息
-            self.logger.info("⏳ 正在加载币安市场信息...")
+            self.logger.info("⏳ 正在尝试连接币安测试网 API (这可能需要几秒钟)...")
             self.exchange.load_markets()
-            self.logger.info("✅ 币安交易连接建立成功 (测试网)")
+            self.logger.info("✅ 币安交易连接建立成功!")
             
         except Exception as e:
             self.logger.error(f"❌ 币安连接初始化失败: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
+            self.logger.error("👉 请检查你的网络/代理设置。测试网域名 testnet.binancefuture.com 在国内必须使用代理。")
+            self.logger.error("👉 如果使用 Docker，代理地址不能写 127.0.0.1，必须写 NAS 的局域网 IP (如 192.168.x.x)")
             raise e
 
-        # 用于存储每个币种的最高收益率状态
         self.trailing_states = {}
 
     def setup_logger(self):
@@ -146,6 +138,31 @@ class BinanceTradingBot:
         console_handler.setFormatter(formatter)
         self.logger.addHandler(handler)
         self.logger.addHandler(console_handler)
+
+    def check_proxy_connection(self, proxies):
+        """检查代理连通性"""
+        if not proxies:
+            self.logger.warning("⚠️ 未配置代理 (Proxies)。如果在国内，连接将极大概率超时！")
+            return
+
+        self.logger.info(f"🔍 正在检查代理配置: {proxies}")
+        if '127.0.0.1' in str(proxies) or 'localhost' in str(proxies):
+            self.logger.error("❌❌❌ 错误: 在 Docker 中代理地址不能设为 127.0.0.1！")
+            self.logger.error("   请在 config.json 中将代理 IP 改为你的 NAS 局域网 IP (例如 192.168.1.5)")
+            return
+
+        try:
+            # 尝试通过代理访问 Google 或 Github
+            test_url = "https://www.google.com"
+            self.logger.info(f"📡 正在尝试通过代理连接 {test_url} ...")
+            resp = requests.get(test_url, proxies=proxies, timeout=10)
+            if resp.status_code == 200:
+                self.logger.info("✅ 代理连接测试通过！网络通畅。")
+            else:
+                self.logger.warning(f"⚠️ 代理测试返回状态码: {resp.status_code}")
+        except Exception as e:
+            self.logger.error(f"❌ 代理连接测试失败: {e}")
+            self.logger.error("   这意味着 Docker 容器无法通过你的代理上网。请检查防火墙或 IP 设置。")
 
     def _watchdog_loop(self):
         self.logger.info("🐕 看门狗线程已启动 (超时阈值: 60秒)")
