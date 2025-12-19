@@ -476,7 +476,12 @@ if __name__ == '__main__':
             bot_config = all_config['binance']
             feishu_url = all_config.get('feishu_webhook')
             
-            bot = BinanceTradingBot(bot_config, feishu_webhook=feishu_url)
+            # ✅ 读取配置文件中的 monitor_interval，默认值为 4
+            interval = all_config.get('monitor_interval', 4)
+            print(f"⏱️ 监控轮询间隔已设置为: {interval} 秒")
+            
+            # ✅ 将 interval 传递给机器人
+            bot = BinanceTradingBot(bot_config, feishu_webhook=feishu_url, monitor_interval=interval)
             bot.trail()
         else:
             print("❌ 致命错误: config.json 中找不到 'binance' 配置块")
