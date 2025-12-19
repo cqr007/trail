@@ -12,48 +12,6 @@ from logging.handlers import TimedRotatingFileHandler
 # 币安依赖
 import ccxt
 
-# ==========================================
-# 🔥 终局之战：BinanceTestnetFix
-# 彻底拦截 ccxt 所有“多余”的市场查询请求
-# ==========================================
-class BinanceTestnetFix(ccxt.binance):
-    def describe(self):
-        config = super().describe()
-        # 1. 强制锁死 URL 到合约测试网 (U本位)
-        # 把 dapi (币本位) 和 eapi (期权) 的 key 也加上，虽然下面会拦截，但防一手漏网之鱼
-        testnet_url = 'https://testnet.binancefuture.com/fapi/v1'
-        config['urls']['api'] = {
-            'public': testnet_url,
-            'private': testnet_url,
-            'fapiPublic': testnet_url,
-            'fapiPrivate': testnet_url,
-            'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-            'sapi': testnet_url, # 现货/杠杆
-            'dapiPublic': testnet_url, # 币本位
-            'dapiPrivate': testnet_url,
-            'eapiPublic': testnet_url, # 期权
-            'eapiPrivate': testnet_url,
-        }
-        # 2. 强制禁用功能标志
-        config['has']['fetchCurrencies'] = False
-        config['has']['fetchMarginPairs'] = False
-        config['options']['fetchMarginPairs'] = False
-        return config
-
-    # --- 拦截 现货/杠杆 接口 ---
-    def sapiGetMarginAllPairs(self, params={}): return []
-    def sapiGetMarginIsolatedAllPairs(self, params={}): return []
-    def sapiGetCapitalConfigGetall(self, params={}): return []
-
-    # --- 拦截 币本位合约 (DAPI) 接口 [你刚才报错的元凶] ---
-    def dapiPublicGetExchangeInfo(self, params={}):
-        # 返回一个伪造的空市场结构，防止 ccxt 报错
-        return {'timezone': 'UTC', 'serverTime': 123456789, 'rateLimits': [], 'exchangeFilters': [], 'symbols': []}
-
-    # --- 拦截 期权合约 (EAPI) 接口 [预判你下一个可能会报错的] ---
-    def eapiPublicGetExchangeInfo(self, params={}):
-        return {'timezone': 'UTC', 'serverTime': 123456789, 'rateLimits': [], 'exchangeFilters': [], 'symbols': []}
-
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
         # 设置全局网络超时时间 (30秒)
@@ -94,21 +52,71 @@ class BinanceTradingBot:
             exchange_config = {
                 'apiKey': config["apiKey"],
                 'secret': config["secret"],
-                'timeout': 30000,
+                'timeout': 30000, 
                 'enableRateLimit': True,
                 'options': {
                     'defaultType': 'future',
                     'adjustForTimeDifference': True,
+                },
+                # 显式禁用部分功能
+                'has': {
+                    'fetchCurrencies': False, 
+                    'fetchMarginPairs': False,
+                },
+                # ✅ 强制所有 API 路径都指向 U本位合约测试网
+                'urls': {
+                    'api': {
+                        'public': 'https://testnet.binancefuture.com/fapi/v1',
+                        'private': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+                        
+                        # 把这些无关的接口也全部强指到这里，防止报错找不到 URL
+                        'sapi': 'https://testnet.binancefuture.com/fapi/v1',
+                        'dapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+                        'dapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+                        'eapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+                        'eapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+                    },
                 }
             }
             # 如果配置了代理
             if "proxies" in config:
                 exchange_config['proxies'] = config['proxies']
 
-            # ✅ 使用终极修正版适配器
-            self.exchange = BinanceTestnetFix(exchange_config)
+            # 初始化标准 ccxt 对象
+            self.exchange = ccxt.binance(exchange_config)
             
-            self.logger.warning("⚠️⚠️⚠️ 已启用终极适配器：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
+            # 🔥🔥🔥 【手术级修复：实例方法强行覆盖】 🔥🔥🔥
+            # 这是 Python 中优先级最高的操作。我们直接把对象里的方法换成“假方法”。
+            # 无论 ccxt 内部逻辑如何，调用这些方法时，都会立即返回空数据，绝不联网。
+            
+            self.logger.info("🛠️ 正在执行 API 手术 (Instance Method Override)...")
+
+            # 1. 定义假数据返回函数
+            empty_list = lambda *args, **kwargs: []
+            # 对于 dapi/eapi，ccxt 期待返回一个包含 'symbols' 的字典，否则会解析报错
+            empty_market_struct = lambda *args, **kwargs: {
+                'symbols': [], 
+                'timezone': 'UTC', 
+                'serverTime': 0, 
+                'rateLimits': [], 
+                'exchangeFilters': []
+            }
+
+            # 2. 覆盖 现货/杠杆 相关接口 (sapi)
+            self.exchange.sapiGetMarginAllPairs = empty_list
+            self.exchange.sapiGetMarginIsolatedAllPairs = empty_list
+            self.exchange.sapiGetCapitalConfigGetall = empty_list
+            
+            # 3. 覆盖 币本位合约 相关接口 (dapi - 你刚才报错的那个)
+            self.exchange.dapiPublicGetExchangeInfo = empty_market_struct
+            
+            # 4. 覆盖 期权 相关接口 (eapi - 预防性覆盖)
+            self.exchange.eapiPublicGetExchangeInfo = empty_market_struct
+
+            self.logger.warning("⚠️⚠️⚠️ 已强制运行在：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
             
             # 预加载市场信息
             self.logger.info("⏳ 正在加载币安市场信息...")
