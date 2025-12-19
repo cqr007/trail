@@ -57,14 +57,16 @@ class BinanceTradingBot:
                 'options': {
                     'defaultType': 'future', # 默认合约交易
                     'adjustForTimeDifference': True,
+                    # ✅ 【关键修复 1】禁用获取杠杆交易对
+                    # 这会阻止 ccxt 调用 'margin/allPairs'，解决 'Method GET is invalid' 报错
+                    'fetchMarginPairs': False, 
                 },
-                # ✅ 【修复关键 1】禁用 fetchCurrencies
-                # 这会阻止 ccxt 调用 'sapi/v1/capital/config/getall' 这个现货接口，避免报错
+                # ✅ 【关键修复 2】禁用获取币种信息
+                # 这会阻止 ccxt 调用 'capital/config/getall' (也是现货接口)
                 'has': {
                     'fetchCurrencies': False
                 },
-                # ✅ 【修复关键 2】全面覆盖 URL
-                # 强制将所有类型的请求（包括可能泄漏的 Spot/Public 请求）都指向合约测试网
+                # ✅ 【关键修复 3】全面覆盖 URL (防止误连正式网)
                 'urls': {
                     'api': {
                         'public': 'https://testnet.binancefuture.com/fapi/v1',
@@ -72,7 +74,9 @@ class BinanceTradingBot:
                         'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                        # 将 sapi (现货) 也强指到测试网，虽然会返回 404，但能防止连接正式网
+                        # 将 sapi (现货/杠杆) 也强指到测试网
+                        # 虽然测试网没有 sapi 接口，但配合上面的 fetchMarginPairs: False，
+                        # 程序就不会再尝试调用它，从而避免报错。
                         'sapi': 'https://testnet.binancefuture.com/fapi/v1',
                     },
                 }
@@ -83,7 +87,6 @@ class BinanceTradingBot:
 
             self.exchange = ccxt.binance(exchange_config)
             
-            # 再次确认：绝对不要调用 set_sandbox_mode(True)
             self.logger.warning("⚠️⚠️⚠️ 已手动配置为币安合约测试网 (Testnet/Demo) - 请确保 config.json 使用测试网 API Key ⚠️⚠️⚠️")
             
             # 预加载市场信息（用于精度计算）
