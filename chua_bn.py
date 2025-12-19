@@ -58,13 +58,22 @@ class BinanceTradingBot:
                     'defaultType': 'future', # 默认合约交易
                     'adjustForTimeDifference': True,
                 },
-                # ✅ 【关键修改】手动指定测试网 URL，替代 set_sandbox_mode(True)
-                # 这样可以绕过 ccxt 的 "not supported" 报错，直接连接合约测试网
+                # ✅ 【修复关键 1】禁用 fetchCurrencies
+                # 这会阻止 ccxt 调用 'sapi/v1/capital/config/getall' 这个现货接口，避免报错
+                'has': {
+                    'fetchCurrencies': False
+                },
+                # ✅ 【修复关键 2】全面覆盖 URL
+                # 强制将所有类型的请求（包括可能泄漏的 Spot/Public 请求）都指向合约测试网
                 'urls': {
                     'api': {
+                        'public': 'https://testnet.binancefuture.com/fapi/v1',
+                        'private': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+                        # 将 sapi (现货) 也强指到测试网，虽然会返回 404，但能防止连接正式网
+                        'sapi': 'https://testnet.binancefuture.com/fapi/v1',
                     },
                 }
             }
@@ -74,7 +83,7 @@ class BinanceTradingBot:
 
             self.exchange = ccxt.binance(exchange_config)
             
-            # ❌ 已删除 self.exchange.set_sandbox_mode(True)，防止触发废弃报错
+            # 再次确认：绝对不要调用 set_sandbox_mode(True)
             self.logger.warning("⚠️⚠️⚠️ 已手动配置为币安合约测试网 (Testnet/Demo) - 请确保 config.json 使用测试网 API Key ⚠️⚠️⚠️")
             
             # 预加载市场信息（用于精度计算）
@@ -87,7 +96,6 @@ class BinanceTradingBot:
             raise e
 
         # 用于存储每个币种的最高收益率状态
-        # Key 格式建议为: "SYMBOL_POSITIONSIDE" (例如 "BTC/USDT_LONG") 以支持双向持仓
         self.trailing_states = {}
 
     def setup_logger(self):
