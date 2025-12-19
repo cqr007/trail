@@ -22,7 +22,6 @@ class BinanceTestnetAdapter(ccxt.binance):
         config = super().describe()
         
         # 1. 强制覆盖 URL，只保留合约测试网地址
-        # 注意：这里把 sapi (现货接口) 也指向测试网，防止连到正式网
         config['urls']['api'] = {
             'public': 'https://testnet.binancefuture.com/fapi/v1',
             'private': 'https://testnet.binancefuture.com/fapi/v1',
@@ -43,19 +42,17 @@ class BinanceTestnetAdapter(ccxt.binance):
         return config
 
     # 🔥 暴力重写：直接返回空列表，绝不发送网络请求
-    # 这就是之前报错 /margin/allPairs 的罪魁祸首
     def fetch_margin_pairs(self, params={}):
         return []
 
     # 🔥 暴力重写：直接返回空字典
-    # 防止调用 /capital/config/getall
     def fetch_currencies(self, params={}):
         return {}
 
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        # 设置全局网络超时时间
-        socket.setdefaulttimeout(15)
+        # 设置全局网络超时时间 (延长到 30s)
+        socket.setdefaulttimeout(30)
 
         # 1. 策略参数加载
         self.leverage = float(config.get("leverage", 20)) 
@@ -92,18 +89,27 @@ class BinanceTradingBot:
             exchange_config = {
                 'apiKey': config["apiKey"],
                 'secret': config["secret"],
-                'timeout': 10000,
+                # ✅ 【关键修改】超时时间增加到 30000ms (30秒)
+                # 测试网和代理网络通常比较慢，10s 容易超时
+                'timeout': 30000, 
                 'enableRateLimit': True,
-                # options 和 urls 已经在 Adapter 类里重写了，这里只需保留基础配置
                 'options': {
                     'adjustForTimeDifference': True,
                 }
             }
-            # 如果配置了代理
+            
+            # 代理检测日志
             if "proxies" in config:
-                exchange_config['proxies'] = config['proxies']
+                proxy_conf = config['proxies']
+                self.logger.info(f"🌐 检测到代理配置: {proxy_conf}")
+                # 警告：Docker 容器内无法访问 127.0.0.1 的代理
+                if '127.0.0.1' in str(proxy_conf) or 'localhost' in str(proxy_conf):
+                    self.logger.warning("⚠️⚠️⚠️ 警告：代理地址包含 127.0.0.1/localhost！在 Docker 内这将失效！请改为 NAS 的局域网 IP (如 192.168.x.x) ⚠️⚠️⚠️")
+                exchange_config['proxies'] = proxy_conf
+            else:
+                self.logger.warning("⚠️ 未配置代理 (Proxies)。如果在国内，连接币安测试网大概率会超时。")
 
-            # ✅ 使用自定义的适配器类，而不是原始的 ccxt.binance
+            # ✅ 使用自定义的适配器类
             self.exchange = BinanceTestnetAdapter(exchange_config)
             
             self.logger.warning("⚠️⚠️⚠️ 已启用自定义适配器：币安合约测试网 (Testnet) 模式 ⚠️⚠️⚠️")
@@ -115,7 +121,6 @@ class BinanceTradingBot:
             
         except Exception as e:
             self.logger.error(f"❌ 币安连接初始化失败: {e}")
-            # 打印更详细的错误堆栈以便调试
             import traceback
             self.logger.error(traceback.format_exc())
             raise e
