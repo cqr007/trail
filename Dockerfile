@@ -21,4 +21,4 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 
 # 启动命令 (默认运行 Hyperliquid 机器人)
-CMD ["python", "chua_Hyperliquid.py"]
+CMD ["python", "chua_bn.py"]
