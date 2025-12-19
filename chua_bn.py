@@ -12,46 +12,9 @@ from logging.handlers import TimedRotatingFileHandler
 # 币安依赖
 import ccxt
 
-# ==========================================
-# 🔥 核心修复：定义一个适配器类
-# 通过继承重写，从根源上禁止调用不支持的接口
-# ==========================================
-class BinanceTestnetAdapter(ccxt.binance):
-    def describe(self):
-        # 获取父类配置
-        config = super().describe()
-        
-        # 1. 强制覆盖 URL，只保留合约测试网地址
-        config['urls']['api'] = {
-            'public': 'https://testnet.binancefuture.com/fapi/v1',
-            'private': 'https://testnet.binancefuture.com/fapi/v1',
-            'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-            'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-            'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-            'sapi': 'https://testnet.binancefuture.com/fapi/v1', 
-        }
-        
-        # 2. 强制声明不支持某些功能
-        config['has']['fetchCurrencies'] = False
-        config['has']['fetchMarginPairs'] = False
-        
-        # 3. 强制默认选项
-        config['options']['defaultType'] = 'future'
-        config['options']['fetchMarginPairs'] = False
-        
-        return config
-
-    # 🔥 暴力重写：直接返回空列表，绝不发送网络请求
-    def fetch_margin_pairs(self, params={}):
-        return []
-
-    # 🔥 暴力重写：直接返回空字典
-    def fetch_currencies(self, params={}):
-        return {}
-
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        # 设置全局网络超时时间 (延长到 30s)
+        # 设置全局网络超时时间 (30秒，防止测试网卡顿)
         socket.setdefaulttimeout(30)
 
         # 1. 策略参数加载
@@ -89,30 +52,57 @@ class BinanceTradingBot:
             exchange_config = {
                 'apiKey': config["apiKey"],
                 'secret': config["secret"],
-                # ✅ 【关键修改】超时时间增加到 30000ms (30秒)
-                # 测试网和代理网络通常比较慢，10s 容易超时
-                'timeout': 30000, 
+                'timeout': 30000,
                 'enableRateLimit': True,
                 'options': {
+                    'defaultType': 'future',
                     'adjustForTimeDifference': True,
+                },
+                'has': {
+                    'fetchCurrencies': False, # 禁用币种获取
+                },
+                # ✅ 强制所有 URL 指向合约测试网
+                'urls': {
+                    'api': {
+                        'public': 'https://testnet.binancefuture.com/fapi/v1',
+                        'private': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+                        'sapi': 'https://testnet.binancefuture.com/fapi/v1', # 故意指错，下面会屏蔽
+                    },
                 }
             }
-            
-            # 代理检测日志
+            # 如果配置了代理
             if "proxies" in config:
-                proxy_conf = config['proxies']
-                self.logger.info(f"🌐 检测到代理配置: {proxy_conf}")
-                # 警告：Docker 容器内无法访问 127.0.0.1 的代理
-                if '127.0.0.1' in str(proxy_conf) or 'localhost' in str(proxy_conf):
-                    self.logger.warning("⚠️⚠️⚠️ 警告：代理地址包含 127.0.0.1/localhost！在 Docker 内这将失效！请改为 NAS 的局域网 IP (如 192.168.x.x) ⚠️⚠️⚠️")
-                exchange_config['proxies'] = proxy_conf
-            else:
-                self.logger.warning("⚠️ 未配置代理 (Proxies)。如果在国内，连接币安测试网大概率会超时。")
+                exchange_config['proxies'] = config['proxies']
 
-            # ✅ 使用自定义的适配器类
-            self.exchange = BinanceTestnetAdapter(exchange_config)
+            self.exchange = ccxt.binance(exchange_config)
             
-            self.logger.warning("⚠️⚠️⚠️ 已启用自定义适配器：币安合约测试网 (Testnet) 模式 ⚠️⚠️⚠️")
+            # 🔥🔥🔥 【核心修复：Monkey Patch】 🔥🔥🔥
+            # 直接在对象实例上，把会导致报错的 API 方法替换成“哑巴方法”
+            # 这样 ccxt 内部调用 self.sapiGetMarginAllPairs() 时，就不会联网，而是直接拿到 []
+            
+            self.logger.info("🛠️ 正在应用 API 屏蔽补丁，禁止调用 margin/allPairs...")
+            
+            # 屏蔽 sapiGetMarginAllPairs (camelCase)
+            if hasattr(self.exchange, 'sapiGetMarginAllPairs'):
+                 self.exchange.sapiGetMarginAllPairs = lambda *args, **kwargs: []
+            else:
+                # 某些旧版本 ccxt 可能是这个名字，为了保险起见强制赋值
+                self.exchange.sapiGetMarginAllPairs = lambda *args, **kwargs: []
+
+            # 屏蔽 sapi_get_margin_allpairs (snake_case)
+            if hasattr(self.exchange, 'sapi_get_margin_allpairs'):
+                self.exchange.sapi_get_margin_allpairs = lambda *args, **kwargs: []
+            else:
+                self.exchange.sapi_get_margin_allpairs = lambda *args, **kwargs: []
+
+            # 屏蔽 sapiGetCapitalConfigGetall (获取所有币种配置的现货接口)
+            self.exchange.sapiGetCapitalConfigGetall = lambda *args, **kwargs: []
+            self.exchange.sapi_get_capital_config_getall = lambda *args, **kwargs: []
+
+            self.logger.warning("⚠️⚠️⚠️ 已强制运行在：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
             
             # 预加载市场信息
             self.logger.info("⏳ 正在加载币安市场信息...")
