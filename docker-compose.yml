@@ -8,7 +8,7 @@ services:
       args:
         http_proxy: http://192.168.1.2:1080
         https_proxy: http://192.168.1.2:1080
-    container_name: hyperliquid--test-bot
+    container_name: hyperliquid-bot
     restart: unless-stopped
     volumes:
       - ./config.json:/app/config.json
@@ -20,21 +20,21 @@ services:
     # 这里不需要写 command，因为它默认使用 Dockerfile 里的 CMD ["python", "chua_Hyperliquid.py"]
 
   # 服务 2: 币安机器人 (新增)
-  bn-bot:
+  #bn-bot:
     # 复用相同的构建上下文，Docker 会智能利用缓存，不用担心重复构建变慢
-    build:
-      context: .
-      args:
-        http_proxy: http://192.168.1.2:1080
-        https_proxy: http://192.168.1.2:1080
-    container_name: binance-test-bot
-    restart: unless-stopped
+    #build:
+      #context: .
+      #args:
+        #http_proxy: http://192.168.1.2:1080
+        #https_proxy: http://192.168.1.2:1080
+    #container_name: binance-bot
+    #restart: unless-stopped
     # ⚠️ 关键修改：覆盖 Dockerfile 的默认命令，指定运行 chua_bn.py
-    command: python chua_bn.py
-    volumes:
-      - ./config.json:/app/config.json
-      - ./logs:/app/logs
-    environment:
-      - TZ=Asia/Shanghai      
-      - https_proxy=http://192.168.1.3:1080
-      - http_proxy=http://192.168.1.3:1080
+    #command: python chua_bn.py
+    #volumes:
+      #- ./config.json:/app/config.json
+      #- ./logs:/app/logs
+    #environment:
+      #- TZ=Asia/Shanghai      
+      #- https_proxy=http://192.168.1.3:1080
+      #- http_proxy=http://192.168.1.3:1080
