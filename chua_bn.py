@@ -14,12 +14,13 @@ import ccxt
 
 # ==========================================
 # 🔥 终局之战：BinanceTestnetFix
-# 彻底拦截 ccxt 所有“多余”的市场查询请求
+# 1. 拦截多余请求
+# 2. 劫持所有域名，强制指向测试网
 # ==========================================
 class BinanceTestnetFix(ccxt.binance):
     def describe(self):
         config = super().describe()
-        # 1. 强制锁死 URL 到合约测试网 (U本位)
+        # 强制定义测试网基础 URL
         testnet_url = 'https://testnet.binancefuture.com/fapi/v1'
         config['urls']['api'] = {
             'public': testnet_url,
@@ -38,7 +39,22 @@ class BinanceTestnetFix(ccxt.binance):
         config['options']['fetchMarginPairs'] = False
         return config
 
-    # 拦截所有杂项接口
+    # --- 🛡️ 防火墙：拦截所有正式网请求，强制重定向到测试网 ---
+    def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
+        # 1. 先让 ccxt 生成标准的请求信息
+        request = super().sign(path, api, method, params, headers, body)
+        
+        # 2. 检查 URL，如果是正式网域名，强行替换为测试网
+        if 'fapi.binance.com' in request['url']:
+            request['url'] = request['url'].replace('fapi.binance.com', 'testnet.binancefuture.com')
+        
+        # 3. 针对 sapi (现货/杠杆) 的防御，如果没拦截住，这里再次替换
+        if 'api.binance.com' in request['url']:
+            request['url'] = request['url'].replace('api.binance.com', 'testnet.binancefuture.com')
+            
+        return request
+
+    # --- 拦截 杂项接口 (返回空数据防止报错) ---
     def sapiGetMarginAllPairs(self, params={}): return []
     def sapiGetMarginIsolatedAllPairs(self, params={}): return []
     def sapiGetCapitalConfigGetall(self, params={}): return []
@@ -49,12 +65,14 @@ class BinanceTestnetFix(ccxt.binance):
 
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        socket.setdefaulttimeout(30) # 30秒超时
+        # 设置全局网络超时时间 (30秒)
+        socket.setdefaulttimeout(30)
 
         # 1. 策略参数加载
         self.leverage = float(config.get("leverage", 20)) 
         self.stop_loss_pct = config["stop_loss_pct"]
         
+        # 移动止盈参数
         self.low_trail_stop_loss_pct = config["low_trail_stop_loss_pct"]
         self.trail_stop_loss_pct = config["trail_stop_loss_pct"]
         self.higher_trail_stop_loss_pct = config["higher_trail_stop_loss_pct"]
@@ -63,6 +81,7 @@ class BinanceTradingBot:
         self.first_trail_profit_threshold = config["first_trail_profit_threshold"]
         self.second_trail_profit_threshold = config["second_trail_profit_threshold"]
 
+        # 部分平仓比例配置
         self.hard_stop_close_ratio = config.get("hard_stop_close_ratio", 1.0)
         self.low_trail_close_ratio = config.get("low_trail_close_ratio", 1.0)
         self.first_trail_close_ratio = config.get("first_trail_close_ratio", 1.0)
@@ -80,7 +99,8 @@ class BinanceTradingBot:
         self.watchdog_started = False
 
         # --- 网络自检 ---
-        self.check_proxy_connection(config.get("proxies"))
+        if "proxies" in config:
+            self.check_proxy_connection(config['proxies'])
 
         # 4. 币安连接配置
         try:
@@ -97,7 +117,7 @@ class BinanceTradingBot:
             if "proxies" in config:
                 exchange_config['proxies'] = config['proxies']
 
-            # 使用修复版适配器
+            # ✅ 使用终极修正版适配器
             self.exchange = BinanceTestnetFix(exchange_config)
             
             # 手术级修复 (Double Check)
@@ -112,16 +132,17 @@ class BinanceTradingBot:
 
             self.logger.warning("⚠️⚠️⚠️ 已强制运行在：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
             
-            self.logger.info("⏳ 正在尝试连接币安测试网 API (这可能需要几秒钟)...")
+            self.logger.info("⏳ 正在加载币安市场信息...")
             self.exchange.load_markets()
-            self.logger.info("✅ 币安交易连接建立成功!")
+            self.logger.info("✅ 币安交易连接建立成功 (测试网)")
             
         except Exception as e:
             self.logger.error(f"❌ 币安连接初始化失败: {e}")
-            self.logger.error("👉 请检查你的网络/代理设置。测试网域名 testnet.binancefuture.com 在国内必须使用代理。")
-            self.logger.error("👉 如果使用 Docker，代理地址不能写 127.0.0.1，必须写 NAS 的局域网 IP (如 192.168.x.x)")
+            import traceback
+            self.logger.error(traceback.format_exc())
             raise e
 
+        # 用于存储每个币种的最高收益率状态
         self.trailing_states = {}
 
     def setup_logger(self):
@@ -141,10 +162,6 @@ class BinanceTradingBot:
 
     def check_proxy_connection(self, proxies):
         """检查代理连通性"""
-        if not proxies:
-            self.logger.warning("⚠️ 未配置代理 (Proxies)。如果在国内，连接将极大概率超时！")
-            return
-
         self.logger.info(f"🔍 正在检查代理配置: {proxies}")
         if '127.0.0.1' in str(proxies) or 'localhost' in str(proxies):
             self.logger.error("❌❌❌ 错误: 在 Docker 中代理地址不能设为 127.0.0.1！")
@@ -152,17 +169,14 @@ class BinanceTradingBot:
             return
 
         try:
-            # 尝试通过代理访问 Google 或 Github
+            # 尝试通过代理访问 Google
             test_url = "https://www.google.com"
-            self.logger.info(f"📡 正在尝试通过代理连接 {test_url} ...")
-            resp = requests.get(test_url, proxies=proxies, timeout=10)
+            resp = requests.get(test_url, proxies=proxies, timeout=5)
             if resp.status_code == 200:
                 self.logger.info("✅ 代理连接测试通过！网络通畅。")
-            else:
-                self.logger.warning(f"⚠️ 代理测试返回状态码: {resp.status_code}")
         except Exception as e:
             self.logger.error(f"❌ 代理连接测试失败: {e}")
-            self.logger.error("   这意味着 Docker 容器无法通过你的代理上网。请检查防火墙或 IP 设置。")
+            self.logger.error("   Docker 容器无法通过代理上网，请检查防火墙或 IP 设置。")
 
     def _watchdog_loop(self):
         self.logger.info("🐕 看门狗线程已启动 (超时阈值: 60秒)")
@@ -193,6 +207,8 @@ class BinanceTradingBot:
         t_start = time.time() 
         try:
             # 获取所有持仓
+            # 注意：ccxt fetch_positions 在币安合约中默认会请求 v2 或 v3 接口
+            # 我们的 sign 方法会拦截这些请求并修正域名
             raw_positions = self.exchange.fetch_positions()
             
             api_duration = time.time() - t_start
@@ -321,7 +337,9 @@ class BinanceTradingBot:
                 positions = self.get_positions_and_prices()
                 
                 if positions is None:
-                    self.logger.warning("⚠️ 数据获取失败，暂停判断 (状态已保护)")
+                    # 这里的 warning 可能会刷屏，如果网络一直不好
+                    # 但保留它有助于知道程序还在尝试
+                    pass 
                     
                 elif not positions:
                     self.trailing_states.clear()
