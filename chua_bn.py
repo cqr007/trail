@@ -57,16 +57,12 @@ class BinanceTradingBot:
                 'options': {
                     'defaultType': 'future', # 默认合约交易
                     'adjustForTimeDifference': True,
-                    # ✅ 【关键修复 1】禁用获取杠杆交易对
-                    # 这会阻止 ccxt 调用 'margin/allPairs'，解决 'Method GET is invalid' 报错
-                    'fetchMarginPairs': False, 
+                    'fetchMarginPairs': False, # 尝试通过配置禁用
                 },
-                # ✅ 【关键修复 2】禁用获取币种信息
-                # 这会阻止 ccxt 调用 'capital/config/getall' (也是现货接口)
                 'has': {
-                    'fetchCurrencies': False
+                    'fetchCurrencies': False # 禁用币种获取，防止调用 sapi 接口
                 },
-                # ✅ 【关键修复 3】全面覆盖 URL (防止误连正式网)
+                # ✅ 全面覆盖 URL，强制指向测试网
                 'urls': {
                     'api': {
                         'public': 'https://testnet.binancefuture.com/fapi/v1',
@@ -74,9 +70,7 @@ class BinanceTradingBot:
                         'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
                         'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                        # 将 sapi (现货/杠杆) 也强指到测试网
-                        # 虽然测试网没有 sapi 接口，但配合上面的 fetchMarginPairs: False，
-                        # 程序就不会再尝试调用它，从而避免报错。
+                        # 这里故意指到合约网，后续通过 Monkey Patch 屏蔽调用
                         'sapi': 'https://testnet.binancefuture.com/fapi/v1',
                     },
                 }
@@ -87,9 +81,23 @@ class BinanceTradingBot:
 
             self.exchange = ccxt.binance(exchange_config)
             
-            self.logger.warning("⚠️⚠️⚠️ 已手动配置为币安合约测试网 (Testnet/Demo) - 请确保 config.json 使用测试网 API Key ⚠️⚠️⚠️")
+            # 🔥🔥🔥 【终极修复：Monkey Patch】 🔥🔥🔥
+            # 这里的逻辑是：ccxt 初始化时会非要贱贱地去调一下 sapi (现货杠杆) 的接口。
+            # 因为我们 URL 指向了合约网，所以会报路径错误。
+            # 我们直接把这个函数替换成一个“哑巴函数”，直接返回空列表，骗过 ccxt。
+            self.logger.info("🛠️ 正在应用测试网兼容补丁 (Monkey Patching)...")
             
-            # 预加载市场信息（用于精度计算）
+            # 1. 屏蔽获取所有杠杆交易对的请求
+            if hasattr(self.exchange, 'sapi_get_margin_allpairs'):
+                self.exchange.sapi_get_margin_allpairs = lambda *args, **kwargs: []
+            
+            # 2. 屏蔽可能导致报错的获取所有币种配置请求
+            if hasattr(self.exchange, 'sapi_get_capital_config_getall'):
+                self.exchange.sapi_get_capital_config_getall = lambda *args, **kwargs: []
+
+            self.logger.warning("⚠️⚠️⚠️ 已手动配置为币安合约测试网 (Testnet/Demo) ⚠️⚠️⚠️")
+            
+            # 预加载市场信息（此时因为上面的补丁，它只会去拉取合约市场，不会报错了）
             self.logger.info("⏳ 正在加载币安市场信息...")
             self.exchange.load_markets()
             self.logger.info("✅ 币安交易连接建立成功 (测试网)")
