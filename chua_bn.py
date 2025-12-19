@@ -12,13 +12,53 @@ from logging.handlers import TimedRotatingFileHandler
 # 币安依赖
 import ccxt
 
+# ==========================================
+# 🔥 核心修复：定义一个适配器类
+# 通过继承重写，从根源上禁止调用不支持的接口
+# ==========================================
+class BinanceTestnetAdapter(ccxt.binance):
+    def describe(self):
+        # 获取父类配置
+        config = super().describe()
+        
+        # 1. 强制覆盖 URL，只保留合约测试网地址
+        # 注意：这里把 sapi (现货接口) 也指向测试网，防止连到正式网
+        config['urls']['api'] = {
+            'public': 'https://testnet.binancefuture.com/fapi/v1',
+            'private': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+            'sapi': 'https://testnet.binancefuture.com/fapi/v1', 
+        }
+        
+        # 2. 强制声明不支持某些功能
+        config['has']['fetchCurrencies'] = False
+        config['has']['fetchMarginPairs'] = False
+        
+        # 3. 强制默认选项
+        config['options']['defaultType'] = 'future'
+        config['options']['fetchMarginPairs'] = False
+        
+        return config
+
+    # 🔥 暴力重写：直接返回空列表，绝不发送网络请求
+    # 这就是之前报错 /margin/allPairs 的罪魁祸首
+    def fetch_margin_pairs(self, params={}):
+        return []
+
+    # 🔥 暴力重写：直接返回空字典
+    # 防止调用 /capital/config/getall
+    def fetch_currencies(self, params={}):
+        return {}
+
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
         # 设置全局网络超时时间
         socket.setdefaulttimeout(15)
 
         # 1. 策略参数加载
-        self.leverage = float(config.get("leverage", 20)) # 币安通常杠杆较高，默认设为20
+        self.leverage = float(config.get("leverage", 20)) 
         self.stop_loss_pct = config["stop_loss_pct"]
         
         # 移动止盈参数
@@ -30,10 +70,10 @@ class BinanceTradingBot:
         self.first_trail_profit_threshold = config["first_trail_profit_threshold"]
         self.second_trail_profit_threshold = config["second_trail_profit_threshold"]
 
-        # 部分平仓比例配置 (支持分批止盈)
+        # 部分平仓比例配置
         self.hard_stop_close_ratio = config.get("hard_stop_close_ratio", 1.0)
         self.low_trail_close_ratio = config.get("low_trail_close_ratio", 1.0)
-        self.first_trail_close_ratio = config.get("first_trail_close_ratio", 1.0) # 建议设为 0.5
+        self.first_trail_close_ratio = config.get("first_trail_close_ratio", 1.0)
         self.second_trail_close_ratio = config.get("second_trail_close_ratio", 1.0)
         
         self.feishu_webhook = feishu_webhook
@@ -54,56 +94,30 @@ class BinanceTradingBot:
                 'secret': config["secret"],
                 'timeout': 10000,
                 'enableRateLimit': True,
+                # options 和 urls 已经在 Adapter 类里重写了，这里只需保留基础配置
                 'options': {
-                    'defaultType': 'future', # 默认合约交易
                     'adjustForTimeDifference': True,
-                    'fetchMarginPairs': False, # 尝试通过配置禁用
-                },
-                'has': {
-                    'fetchCurrencies': False # 禁用币种获取，防止调用 sapi 接口
-                },
-                # ✅ 全面覆盖 URL，强制指向测试网
-                'urls': {
-                    'api': {
-                        'public': 'https://testnet.binancefuture.com/fapi/v1',
-                        'private': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                        # 这里故意指到合约网，后续通过 Monkey Patch 屏蔽调用
-                        'sapi': 'https://testnet.binancefuture.com/fapi/v1',
-                    },
                 }
             }
             # 如果配置了代理
             if "proxies" in config:
                 exchange_config['proxies'] = config['proxies']
 
-            self.exchange = ccxt.binance(exchange_config)
+            # ✅ 使用自定义的适配器类，而不是原始的 ccxt.binance
+            self.exchange = BinanceTestnetAdapter(exchange_config)
             
-            # 🔥🔥🔥 【终极修复：Monkey Patch】 🔥🔥🔥
-            # 这里的逻辑是：ccxt 初始化时会非要贱贱地去调一下 sapi (现货杠杆) 的接口。
-            # 因为我们 URL 指向了合约网，所以会报路径错误。
-            # 我们直接把这个函数替换成一个“哑巴函数”，直接返回空列表，骗过 ccxt。
-            self.logger.info("🛠️ 正在应用测试网兼容补丁 (Monkey Patching)...")
+            self.logger.warning("⚠️⚠️⚠️ 已启用自定义适配器：币安合约测试网 (Testnet) 模式 ⚠️⚠️⚠️")
             
-            # 1. 屏蔽获取所有杠杆交易对的请求
-            if hasattr(self.exchange, 'sapi_get_margin_allpairs'):
-                self.exchange.sapi_get_margin_allpairs = lambda *args, **kwargs: []
-            
-            # 2. 屏蔽可能导致报错的获取所有币种配置请求
-            if hasattr(self.exchange, 'sapi_get_capital_config_getall'):
-                self.exchange.sapi_get_capital_config_getall = lambda *args, **kwargs: []
-
-            self.logger.warning("⚠️⚠️⚠️ 已手动配置为币安合约测试网 (Testnet/Demo) ⚠️⚠️⚠️")
-            
-            # 预加载市场信息（此时因为上面的补丁，它只会去拉取合约市场，不会报错了）
+            # 预加载市场信息
             self.logger.info("⏳ 正在加载币安市场信息...")
             self.exchange.load_markets()
             self.logger.info("✅ 币安交易连接建立成功 (测试网)")
             
         except Exception as e:
             self.logger.error(f"❌ 币安连接初始化失败: {e}")
+            # 打印更详细的错误堆栈以便调试
+            import traceback
+            self.logger.error(traceback.format_exc())
             raise e
 
         # 用于存储每个币种的最高收益率状态
@@ -153,7 +167,6 @@ class BinanceTradingBot:
         t_start = time.time() 
         try:
             # 获取所有持仓
-            # balance = self.exchange.fetch_balance() # 备用方案
             raw_positions = self.exchange.fetch_positions()
             
             api_duration = time.time() - t_start
@@ -164,42 +177,31 @@ class BinanceTradingBot:
             
             for pos in raw_positions:
                 symbol = pos['symbol']
-                
-                # 兼容不同版本的 ccxt 和 API 返回结构
-                # 币安合约通常在 info 里有 positionAmt, positionSide, entryPrice, markPrice
                 info = pos['info']
+                # 兼容不同版本的返回结构
                 raw_size = float(info.get('positionAmt', pos.get('contracts', 0)))
                 
                 if raw_size == 0:
                     continue
 
-                # 关键：判断持仓方向（支持双向持仓）
-                # positionSide: 'LONG', 'SHORT', 'BOTH'(单向)
+                # 判断持仓方向
                 pos_side_raw = info.get('positionSide', 'BOTH')
-                
-                # 标准化 side 为 LONG/SHORT 用于逻辑判断
                 if pos_side_raw == 'LONG':
                     logic_side = 'LONG'
                 elif pos_side_raw == 'SHORT':
                     logic_side = 'SHORT'
                 else:
-                    # 单向模式下通过数量正负判断
                     logic_side = 'LONG' if raw_size > 0 else 'SHORT'
 
                 entry_price = float(pos.get('entryPrice', info.get('entryPrice', 0)))
-                # 优先使用 markPrice 计算盈亏
+                # 优先使用 markPrice
                 current_price = float(pos.get('markPrice', info.get('markPrice', 0)))
                 unrealized_pnl = float(pos.get('unrealizedPnl', info.get('unrealizedPnl', 0)))
 
                 if entry_price == 0 or current_price == 0:
                     continue
 
-                # 计算收益率 (使用未结盈亏 / 保证金)
-                # 注意：这里我们重新计算一下基于 entryPrice 的涨跌幅作为参考，
-                # 或者直接使用交易所返回的 unrealizedPnl。
-                # 为了策略统一，这里沿用 Hyperliquid 的逻辑：(Unrealized PnL / Margin) * 100
-                # 但币安 Margin 计算较复杂（涉及杠杆），这里简化为：(盈亏 / (名义价值/杠杆))
-                
+                # 计算收益率
                 notional = abs(raw_size) * entry_price
                 margin = notional / self.leverage
                 
@@ -210,15 +212,15 @@ class BinanceTradingBot:
 
                 active_positions.append({
                     "symbol": symbol,
-                    "side": logic_side,           # 逻辑方向: LONG/SHORT
-                    "pos_side_api": pos_side_raw, # API原生方向: LONG/SHORT/BOTH (下单用)
-                    "size": abs(raw_size),        # 绝对值数量
-                    "raw_size": raw_size,         # 原始数量（带正负）
+                    "side": logic_side,
+                    "pos_side_api": pos_side_raw, 
+                    "size": abs(raw_size),
+                    "raw_size": raw_size,
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "profit_pct": profit_pct,
                     "pnl_usdc": unrealized_pnl,
-                    "unique_key": f"{symbol}_{pos_side_raw}" # 唯一标识符
+                    "unique_key": f"{symbol}_{pos_side_raw}"
                 })
                 
             return active_positions
@@ -234,9 +236,7 @@ class BinanceTradingBot:
         unique_key = pos_info['unique_key']
 
         try:
-            # 1. 精度处理
             amount_str = self.amount_to_precision(symbol, size_to_close)
-            # ccxt create_order 需要 float 或 数字字符串，部分交易所对字符串支持更好
             amount_float = float(amount_str)
             
             if amount_float <= 0:
@@ -246,16 +246,12 @@ class BinanceTradingBot:
             action_type = "部分减仓" if is_partial else "全仓止盈/损"
             self.logger.info(f"正在执行 {symbol} {action_type}: 数量 {amount_str}, 方向 {logic_side} ({reason})")
             
-            # 2. 确定交易方向 (Side)
-            # 平多 -> SELL, 平空 -> BUY
             trade_side = 'sell' if logic_side == 'LONG' else 'buy'
             
-            # 3. 构建参数 (ReduceOnly & PositionSide)
             params = {'reduceOnly': True}
             if pos_side_api in ['LONG', 'SHORT']:
                 params['positionSide'] = pos_side_api
             
-            # 4. 执行下单
             order = self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -268,13 +264,10 @@ class BinanceTradingBot:
             self.logger.info(msg)
             self.send_feishu_alert(msg)
             
-            # 5. 状态管理
             if is_partial:
-                # 部分平仓：重置该持仓的最高收益记录，防止连续触发
                 self.trailing_states[unique_key] = current_profit_pct
                 self.logger.info(f"🔄 {symbol} 剩余仓位状态重置，以当前收益 ({current_profit_pct:.2f}%) 为基准继续监控")
             else:
-                # 全平：删除状态
                 if unique_key in self.trailing_states:
                     del self.trailing_states[unique_key]
                 
@@ -330,7 +323,7 @@ class BinanceTradingBot:
                         
                         highest_profit = self.trailing_states[unique_key]
 
-                        # --- 档位与比例判断逻辑 (与 Hyperliquid 版本一致) ---
+                        # --- 档位与比例判断逻辑 ---
                         current_tier = "未达标"
                         trigger_msg = ""
                         ratio = 0.0
@@ -367,11 +360,11 @@ class BinanceTradingBot:
                             # 1. 计算数量
                             size_to_close = total_size * ratio
                             
-                            # 2. 判断是否部分平仓 (预留 5% 容差防止碎股)
+                            # 2. 判断是否部分平仓
                             is_partial = (ratio < 0.99) and ((total_size - size_to_close) > (total_size * 0.05))
                             
                             if not is_partial:
-                                size_to_close = total_size # 确保全平时不留尾巴
+                                size_to_close = total_size
 
                             self.close_position(
                                 pos, 
@@ -380,7 +373,7 @@ class BinanceTradingBot:
                                 is_partial=is_partial, 
                                 current_profit_pct=profit_pct
                             )
-                            continue # 处理完跳过日志打印
+                            continue 
                             
                         self.logger.info(f"监控中: {symbol} | 方向: {pos['side']} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
 
