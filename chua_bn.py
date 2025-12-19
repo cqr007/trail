@@ -22,12 +22,19 @@ class BinanceTestnetFix(ccxt.binance):
         config = super().describe()
         # 强制定义测试网基础 URL
         testnet_url = 'https://testnet.binancefuture.com/fapi/v1'
+        
+        # ✅✅✅ 修复核心：补全 fapiPrivateV3 地址 ✅✅✅
         config['urls']['api'] = {
             'public': testnet_url,
             'private': testnet_url,
-            'fapiPublic': testnet_url,
-            'fapiPrivate': testnet_url,
+            
+            # 合约接口 V1 / V2 / V3 全部指向测试网对应路径
+            'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
             'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+            'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', # <--- 之前缺的就是这一行！
+            
+            # 杂项接口强指到测试网 (防止报错)
             'sapi': testnet_url, 
             'dapiPublic': testnet_url, 
             'dapiPrivate': testnet_url,
@@ -41,17 +48,12 @@ class BinanceTestnetFix(ccxt.binance):
 
     # --- 🛡️ 防火墙：拦截所有正式网请求，强制重定向到测试网 ---
     def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
-        # 1. 先让 ccxt 生成标准的请求信息
         request = super().sign(path, api, method, params, headers, body)
-        
-        # 2. 检查 URL，如果是正式网域名，强行替换为测试网
+        # 强制替换域名
         if 'fapi.binance.com' in request['url']:
             request['url'] = request['url'].replace('fapi.binance.com', 'testnet.binancefuture.com')
-        
-        # 3. 针对 sapi (现货/杠杆) 的防御，如果没拦截住，这里再次替换
         if 'api.binance.com' in request['url']:
             request['url'] = request['url'].replace('api.binance.com', 'testnet.binancefuture.com')
-            
         return request
 
     # --- 拦截 杂项接口 (返回空数据防止报错) ---
@@ -207,8 +209,6 @@ class BinanceTradingBot:
         t_start = time.time() 
         try:
             # 获取所有持仓
-            # 注意：ccxt fetch_positions 在币安合约中默认会请求 v2 或 v3 接口
-            # 我们的 sign 方法会拦截这些请求并修正域名
             raw_positions = self.exchange.fetch_positions()
             
             api_duration = time.time() - t_start
@@ -337,8 +337,7 @@ class BinanceTradingBot:
                 positions = self.get_positions_and_prices()
                 
                 if positions is None:
-                    # 这里的 warning 可能会刷屏，如果网络一直不好
-                    # 但保留它有助于知道程序还在尝试
+                    # 网络偶尔波动是正常的，不需要处理，继续循环
                     pass 
                     
                 elif not positions:
