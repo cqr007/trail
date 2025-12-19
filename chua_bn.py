@@ -57,6 +57,15 @@ class BinanceTradingBot:
                 'options': {
                     'defaultType': 'future', # 默认合约交易
                     'adjustForTimeDifference': True,
+                },
+                # ✅ 【关键修改】手动指定测试网 URL，替代 set_sandbox_mode(True)
+                # 这样可以绕过 ccxt 的 "not supported" 报错，直接连接合约测试网
+                'urls': {
+                    'api': {
+                        'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+                        'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+                    },
                 }
             }
             # 如果配置了代理
@@ -65,11 +74,8 @@ class BinanceTradingBot:
 
             self.exchange = ccxt.binance(exchange_config)
             
-            # --- [新增] 开启测试网模式 (Sandbox Mode) ---
-            # 这会自动将 API 接口切换到 testnet.binancefuture.com
-            self.exchange.set_sandbox_mode(True)
-            self.logger.warning("⚠️⚠️⚠️ 已启用币安测试网 (Sandbox Mode) - 请确保 config.json 使用测试网 API Key ⚠️⚠️⚠️")
-            # ----------------------------------------
+            # ❌ 已删除 self.exchange.set_sandbox_mode(True)，防止触发废弃报错
+            self.logger.warning("⚠️⚠️⚠️ 已手动配置为币安合约测试网 (Testnet/Demo) - 请确保 config.json 使用测试网 API Key ⚠️⚠️⚠️")
             
             # 预加载市场信息（用于精度计算）
             self.logger.info("⏳ 正在加载币安市场信息...")
