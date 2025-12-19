@@ -69,5 +69,5 @@
         "blacklist": [""]
     },
     "feishu_webhook": "",
-    "monitor_interval": 4
+    "monitor_interval": 10
 }
