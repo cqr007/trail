@@ -12,6 +12,41 @@ from logging.handlers import TimedRotatingFileHandler
 # 币安依赖
 import ccxt
 
+# ==========================================
+# 🔥 核武器级修复：自定义适配器类
+# 直接继承 ccxt.binance 并重写那些捣乱的方法
+# ==========================================
+class BinanceTestnetFix(ccxt.binance):
+    def describe(self):
+        config = super().describe()
+        # 1. 强制锁死 URL 到合约测试网
+        config['urls']['api'] = {
+            'public': 'https://testnet.binancefuture.com/fapi/v1',
+            'private': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+            # 即使这里指错了，下面的重写方法也会拦截调用，双重保险
+            'sapi': 'https://testnet.binancefuture.com/fapi/v1', 
+        }
+        # 2. 强制禁用功能标志
+        config['has']['fetchCurrencies'] = False
+        config['has']['fetchMarginPairs'] = False
+        config['options']['fetchMarginPairs'] = False
+        return config
+
+    # 🔥 重写方法 1：拦截全仓杠杆交易对请求
+    def sapiGetMarginAllPairs(self, params={}):
+        return []
+
+    # 🔥 重写方法 2：拦截逐仓杠杆交易对请求 (你刚才报错的元凶)
+    def sapiGetMarginIsolatedAllPairs(self, params={}):
+        return []
+
+    # 🔥 重写方法 3：拦截现货资产配置请求
+    def sapiGetCapitalConfigGetall(self, params={}):
+        return []
+
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
         # 设置全局网络超时时间 (30秒，防止测试网卡顿)
@@ -57,53 +92,17 @@ class BinanceTradingBot:
                 'options': {
                     'defaultType': 'future',
                     'adjustForTimeDifference': True,
-                },
-                'has': {
-                    'fetchCurrencies': False, 
-                    'fetchMarginPairs': False, # 显式声明不支持
-                },
-                # ✅ 强制所有 URL 指向合约测试网
-                'urls': {
-                    'api': {
-                        'public': 'https://testnet.binancefuture.com/fapi/v1',
-                        'private': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-                        'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                        'sapi': 'https://testnet.binancefuture.com/fapi/v1', # 必须指错，然后屏蔽
-                    },
                 }
             }
             # 如果配置了代理
             if "proxies" in config:
                 exchange_config['proxies'] = config['proxies']
 
-            self.exchange = ccxt.binance(exchange_config)
+            # ✅ 使用我们自定义的 "BinanceTestnetFix" 类
+            # 这个类已经从底层代码级别 "阉割" 掉了所有现货/杠杆接口
+            self.exchange = BinanceTestnetFix(exchange_config)
             
-            # 🔥🔥🔥 【核心修复：Monkey Patch 全家桶】 🔥🔥🔥
-            # 我们要把 ccxt 初始化时所有可能调用的 sapi (现货/杠杆) 接口全屏蔽掉
-            
-            self.logger.info("🛠️ 正在应用 API 屏蔽补丁 (屏蔽 Margin/Isolated/Capital)...")
-            
-            # 定义一个返回空列表的哑巴函数
-            dummy_list = lambda *args, **kwargs: []
-            dummy_dict = lambda *args, **kwargs: {}
-
-            # 1. 屏蔽 全仓杠杆 交易对 (你上一次遇到的错误)
-            if hasattr(self.exchange, 'sapiGetMarginAllPairs'):
-                 self.exchange.sapiGetMarginAllPairs = dummy_list
-            self.exchange.sapi_get_margin_allpairs = dummy_list
-
-            # 2. ✅✅✅ 屏蔽 逐仓杠杆 交易对 (你刚刚遇到的错误 /margin/isolated/allPairs) ✅✅✅
-            if hasattr(self.exchange, 'sapiGetMarginIsolatedAllPairs'):
-                self.exchange.sapiGetMarginIsolatedAllPairs = dummy_list
-            self.exchange.sapi_get_margin_isolated_allpairs = dummy_list
-
-            # 3. 屏蔽 现货资产配置
-            self.exchange.sapiGetCapitalConfigGetall = dummy_list
-            self.exchange.sapi_get_capital_config_getall = dummy_list
-
-            self.logger.warning("⚠️⚠️⚠️ 已强制运行在：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
+            self.logger.warning("⚠️⚠️⚠️ 已启用终极适配器：币安合约测试网 (Testnet) ⚠️⚠️⚠️")
             
             # 预加载市场信息
             self.logger.info("⏳ 正在加载币安市场信息...")
