@@ -14,27 +14,18 @@ import ccxt
 
 # ==========================================
 # 🔥 终局之战：BinanceTestnetFix
-# 1. 拦截多余请求
-# 2. 劫持所有域名，强制指向测试网
 # ==========================================
 class BinanceTestnetFix(ccxt.binance):
     def describe(self):
         config = super().describe()
-        # 强制定义测试网基础 URL
         testnet_url = 'https://testnet.binancefuture.com/fapi/v1'
-        
-        # ✅✅✅ 修复核心：补全 fapiPrivateV3 地址 ✅✅✅
         config['urls']['api'] = {
             'public': testnet_url,
             'private': testnet_url,
-            
-            # 合约接口 V1 / V2 / V3 全部指向测试网对应路径
-            'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-            'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+            'fapiPublic': testnet_url,
+            'fapiPrivate': testnet_url,
             'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-            'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', # <--- 之前缺的就是这一行！
-            
-            # 杂项接口强指到测试网 (防止报错)
+            'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3',
             'sapi': testnet_url, 
             'dapiPublic': testnet_url, 
             'dapiPrivate': testnet_url,
@@ -46,17 +37,14 @@ class BinanceTestnetFix(ccxt.binance):
         config['options']['fetchMarginPairs'] = False
         return config
 
-    # --- 🛡️ 防火墙：拦截所有正式网请求，强制重定向到测试网 ---
     def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
         request = super().sign(path, api, method, params, headers, body)
-        # 强制替换域名
         if 'fapi.binance.com' in request['url']:
             request['url'] = request['url'].replace('fapi.binance.com', 'testnet.binancefuture.com')
         if 'api.binance.com' in request['url']:
             request['url'] = request['url'].replace('api.binance.com', 'testnet.binancefuture.com')
         return request
 
-    # --- 拦截 杂项接口 (返回空数据防止报错) ---
     def sapiGetMarginAllPairs(self, params={}): return []
     def sapiGetMarginIsolatedAllPairs(self, params={}): return []
     def sapiGetCapitalConfigGetall(self, params={}): return []
@@ -67,7 +55,6 @@ class BinanceTestnetFix(ccxt.binance):
 
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        # 设置全局网络超时时间 (30秒)
         socket.setdefaulttimeout(30)
 
         # 1. 策略参数加载
@@ -119,10 +106,8 @@ class BinanceTradingBot:
             if "proxies" in config:
                 exchange_config['proxies'] = config['proxies']
 
-            # ✅ 使用终极修正版适配器
             self.exchange = BinanceTestnetFix(exchange_config)
             
-            # 手术级修复 (Double Check)
             empty_list = lambda *args, **kwargs: []
             empty_struct = lambda *args, **kwargs: {'symbols': [], 'timezone': 'UTC', 'serverTime': 0, 'rateLimits': [], 'exchangeFilters': []}
             
@@ -144,7 +129,6 @@ class BinanceTradingBot:
             self.logger.error(traceback.format_exc())
             raise e
 
-        # 用于存储每个币种的最高收益率状态
         self.trailing_states = {}
 
     def setup_logger(self):
@@ -163,22 +147,18 @@ class BinanceTradingBot:
         self.logger.addHandler(console_handler)
 
     def check_proxy_connection(self, proxies):
-        """检查代理连通性"""
         self.logger.info(f"🔍 正在检查代理配置: {proxies}")
         if '127.0.0.1' in str(proxies) or 'localhost' in str(proxies):
             self.logger.error("❌❌❌ 错误: 在 Docker 中代理地址不能设为 127.0.0.1！")
-            self.logger.error("   请在 config.json 中将代理 IP 改为你的 NAS 局域网 IP (例如 192.168.1.5)")
             return
 
         try:
-            # 尝试通过代理访问 Google
             test_url = "https://www.google.com"
             resp = requests.get(test_url, proxies=proxies, timeout=5)
             if resp.status_code == 200:
-                self.logger.info("✅ 代理连接测试通过！网络通畅。")
+                self.logger.info("✅ 代理连接测试通过！")
         except Exception as e:
             self.logger.error(f"❌ 代理连接测试失败: {e}")
-            self.logger.error("   Docker 容器无法通过代理上网，请检查防火墙或 IP 设置。")
 
     def _watchdog_loop(self):
         self.logger.info("🐕 看门狗线程已启动 (超时阈值: 60秒)")
@@ -198,7 +178,6 @@ class BinanceTradingBot:
         except Exception as e:
             self.logger.error(f"飞书报警发送失败: {e}")
 
-    # 辅助函数：处理数量精度
     def amount_to_precision(self, symbol, amount):
         try:
             return self.exchange.amount_to_precision(symbol, amount)
@@ -208,7 +187,6 @@ class BinanceTradingBot:
     def get_positions_and_prices(self):
         t_start = time.time() 
         try:
-            # 获取所有持仓
             raw_positions = self.exchange.fetch_positions()
             
             api_duration = time.time() - t_start
@@ -220,13 +198,11 @@ class BinanceTradingBot:
             for pos in raw_positions:
                 symbol = pos['symbol']
                 info = pos['info']
-                # 兼容不同版本的返回结构
                 raw_size = float(info.get('positionAmt', pos.get('contracts', 0)))
                 
                 if raw_size == 0:
                     continue
 
-                # 判断持仓方向
                 pos_side_raw = info.get('positionSide', 'BOTH')
                 if pos_side_raw == 'LONG':
                     logic_side = 'LONG'
@@ -236,14 +212,12 @@ class BinanceTradingBot:
                     logic_side = 'LONG' if raw_size > 0 else 'SHORT'
 
                 entry_price = float(pos.get('entryPrice', info.get('entryPrice', 0)))
-                # 优先使用 markPrice
                 current_price = float(pos.get('markPrice', info.get('markPrice', 0)))
                 unrealized_pnl = float(pos.get('unrealizedPnl', info.get('unrealizedPnl', 0)))
 
                 if entry_price == 0 or current_price == 0:
                     continue
 
-                # 计算收益率
                 notional = abs(raw_size) * entry_price
                 margin = notional / self.leverage
                 
@@ -271,6 +245,7 @@ class BinanceTradingBot:
             self.logger.error(f"❌ 获取数据失败 (保持状态): {e}")
             return None 
 
+    # --- ✅ 关键修改：修复 Hedge Mode 下的 reduceOnly 参数问题 ---
     def close_position(self, pos_info, size_to_close, reason="", is_partial=False, current_profit_pct=0.0):
         symbol = pos_info['symbol']
         logic_side = pos_info['side']
@@ -290,9 +265,13 @@ class BinanceTradingBot:
             
             trade_side = 'sell' if logic_side == 'LONG' else 'buy'
             
-            params = {'reduceOnly': True}
+            params = {}
+            # ✅ 修复逻辑：如果是双向持仓 (Hedge Mode)，不能发 reduceOnly
             if pos_side_api in ['LONG', 'SHORT']:
                 params['positionSide'] = pos_side_api
+            else:
+                # ✅ 只有在单向持仓 (One-Way Mode) 时，才需要 reduceOnly
+                params['reduceOnly'] = True
             
             order = self.exchange.create_order(
                 symbol=symbol,
@@ -337,7 +316,6 @@ class BinanceTradingBot:
                 positions = self.get_positions_and_prices()
                 
                 if positions is None:
-                    # 网络偶尔波动是正常的，不需要处理，继续循环
                     pass 
                     
                 elif not positions:
@@ -357,7 +335,6 @@ class BinanceTradingBot:
                         if symbol in self.blacklist:
                             continue
 
-                        # 初始化或更新最高收益
                         if unique_key not in self.trailing_states:
                             self.trailing_states[unique_key] = profit_pct
                         else:
@@ -366,7 +343,6 @@ class BinanceTradingBot:
                         
                         highest_profit = self.trailing_states[unique_key]
 
-                        # --- 档位与比例判断逻辑 ---
                         current_tier = "未达标"
                         trigger_msg = ""
                         ratio = 0.0
@@ -392,18 +368,13 @@ class BinanceTradingBot:
                                 ratio = self.low_trail_close_ratio
                                 trigger_msg = f"触发低收益保护 (最高: {highest_profit:.2f}%)"
                         
-                        # 硬止损检查
                         if not trigger_msg and profit_pct <= -self.stop_loss_pct:
                             ratio = self.hard_stop_close_ratio
                             trigger_msg = f"触发硬止损 (当前: {profit_pct:.2f}%)"
                             current_tier = "硬止损"
                             
-                        # --- 执行平仓逻辑 ---
                         if trigger_msg and ratio > 0:
-                            # 1. 计算数量
                             size_to_close = total_size * ratio
-                            
-                            # 2. 判断是否部分平仓
                             is_partial = (ratio < 0.99) and ((total_size - size_to_close) > (total_size * 0.05))
                             
                             if not is_partial:
