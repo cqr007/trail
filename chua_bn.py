@@ -12,16 +12,53 @@ from logging.handlers import TimedRotatingFileHandler
 # 币安依赖
 import ccxt
 
+# ==========================================
+# 🔥 核心修复：BinanceFormalFix (正式网专用)
+# ==========================================
+class BinanceFormalFix(ccxt.binance):
+    def describe(self):
+        config = super().describe()
+        # 1. 强制禁用所有非合约功能
+        config['has']['fetchCurrencies'] = False
+        config['has']['fetchMarginPairs'] = False
+        config['options']['fetchMarginPairs'] = False
+        # 2. 默认设为 future
+        config['options']['defaultType'] = 'future'
+        return config
+
+    def publicGetExchangeInfo(self, params={}):
+        return {
+            'timezone': 'UTC',
+            'serverTime': int(time.time() * 1000),
+            'rateLimits': [],
+            'exchangeFilters': [],
+            'symbols': [] 
+        }
+
+    def sapiGetCapitalConfigGetall(self, params={}): 
+        return []
+
+    def sapiGetMarginAllPairs(self, params={}):
+        return []
+
+    def sapiGetMarginIsolatedAllPairs(self, params={}):
+        return []
+
+    def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
+        request = super().sign(path, api, method, params, headers, body)
+        if 'api.binance.com' in request['url']:
+            pass
+        return request
+
 class BinanceTradingBot:
     def __init__(self, config, feishu_webhook=None, monitor_interval=4):
-        # 设置全局网络超时时间
-        socket.setdefaulttimeout(15)
+        # 设置全局网络超时时间 (60秒，代理可能慢)
+        socket.setdefaulttimeout(60)
 
         # 1. 策略参数加载
-        self.leverage = float(config.get("leverage", 20)) # 币安通常杠杆较高，默认设为20
+        self.leverage = float(config.get("leverage", 20)) 
         self.stop_loss_pct = config["stop_loss_pct"]
         
-        # 移动止盈参数
         self.low_trail_stop_loss_pct = config["low_trail_stop_loss_pct"]
         self.trail_stop_loss_pct = config["trail_stop_loss_pct"]
         self.higher_trail_stop_loss_pct = config["higher_trail_stop_loss_pct"]
@@ -30,10 +67,9 @@ class BinanceTradingBot:
         self.first_trail_profit_threshold = config["first_trail_profit_threshold"]
         self.second_trail_profit_threshold = config["second_trail_profit_threshold"]
 
-        # 部分平仓比例配置 (支持分批止盈)
         self.hard_stop_close_ratio = config.get("hard_stop_close_ratio", 1.0)
         self.low_trail_close_ratio = config.get("low_trail_close_ratio", 1.0)
-        self.first_trail_close_ratio = config.get("first_trail_close_ratio", 1.0) # 建议设为 0.5
+        self.first_trail_close_ratio = config.get("first_trail_close_ratio", 1.0)
         self.second_trail_close_ratio = config.get("second_trail_close_ratio", 1.0)
         
         self.feishu_webhook = feishu_webhook
@@ -47,35 +83,75 @@ class BinanceTradingBot:
         self.last_heartbeat = time.time()
         self.watchdog_started = False
 
-        # 4. 币安连接配置
+        # --- 网络自检 ---
+        self.check_network_connectivity(config.get('proxies'))
+
+        # 4. 币安连接配置 (正式网)
         try:
             exchange_config = {
                 'apiKey': config["apiKey"],
                 'secret': config["secret"],
-                'timeout': 10000,
+                'timeout': 60000, # 增加超时时间到 60s
                 'enableRateLimit': True,
                 'options': {
-                    'defaultType': 'future', # 默认合约交易
+                    'defaultType': 'future',
                     'adjustForTimeDifference': True,
+                },
+                'has': {
+                    'fetchCurrencies': False, 
+                    'fetchMarginPairs': False,
                 }
             }
-            # 如果配置了代理
-            if "proxies" in config:
-                exchange_config['proxies'] = config['proxies']
-
-            self.exchange = ccxt.binance(exchange_config)
             
-            # 预加载市场信息（用于精度计算）
-            self.logger.info("⏳ 正在加载币安市场信息...")
+            # 🔥🔥🔥 核心修复：强制注入代理 🔥🔥🔥
+            # 如果 config.json 没写 proxies，我们从环境变量里抓出来强制塞给 ccxt
+            # 这能解决 ccxt 无法自动读取 Docker 环境变量的问题
+            if "proxies" in config and config['proxies']:
+                exchange_config['proxies'] = config['proxies']
+                self.logger.info(f"⚙️ 使用 Config 文件代理配置: {config['proxies']}")
+            else:
+                # 尝试从环境变量获取
+                env_http = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
+                env_https = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
+                
+                if env_http or env_https:
+                    # 如果只有 http_proxy，HTTPS 也用它
+                    proxy_url = env_http if env_http else env_https
+                    forced_proxies = {
+                        'http': proxy_url,
+                        'https': proxy_url, # 币安是 HTTPS，这一行至关重要
+                    }
+                    exchange_config['proxies'] = forced_proxies
+                    self.logger.info(f"⚙️ 自动注入环境变量代理到 ccxt: {forced_proxies}")
+                else:
+                    self.logger.warning("⚠️ 警告：Config 和 环境变量 均未发现代理！连接币安可能失败。")
+
+            # ✅ 使用自定义的 "BinanceFormalFix" 类
+            self.exchange = BinanceFormalFix(exchange_config)
+            
+            # 手术级修复
+            dummy_list = lambda *args, **kwargs: []
+            self.exchange.sapiGetCapitalConfigGetall = dummy_list
+            self.exchange.sapiGetMarginAllPairs = dummy_list
+            self.exchange.sapiGetMarginIsolatedAllPairs = dummy_list
+            self.exchange.publicGetExchangeInfo = lambda *args, **kwargs: {
+                'timezone': 'UTC',
+                'serverTime': int(time.time() * 1000),
+                'rateLimits': [],
+                'exchangeFilters': [],
+                'symbols': []
+            }
+            
+            self.logger.info("⏳ 正在加载币安合约市场信息 (Futures Only)...")
             self.exchange.load_markets()
-            self.logger.info("✅ 币安交易连接建立成功")
+            self.logger.info("✅ 币安正式网连接建立成功！")
             
         except Exception as e:
             self.logger.error(f"❌ 币安连接初始化失败: {e}")
+            self.logger.error("👉 请检查 API Key 权限、网络代理设置是否正确。")
             raise e
 
         # 用于存储每个币种的最高收益率状态
-        # Key 格式建议为: "SYMBOL_POSITIONSIDE" (例如 "BTC/USDT_LONG") 以支持双向持仓
         self.trailing_states = {}
 
     def setup_logger(self):
@@ -92,6 +168,36 @@ class BinanceTradingBot:
         console_handler.setFormatter(formatter)
         self.logger.addHandler(handler)
         self.logger.addHandler(console_handler)
+
+    def check_network_connectivity(self, proxies_from_config):
+        """检查网络连通性"""
+        proxies_to_use = proxies_from_config
+        env_http = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
+        
+        if not proxies_to_use:
+            if env_http:
+                self.logger.info(f"🔍 检测到 Docker 环境变量代理: {env_http}")
+                # 构造临时测试用的 proxies
+                proxies_to_use = {"http": env_http, "https": env_http}
+            else:
+                self.logger.warning("⚠️ 未检测到任何代理配置 (Config/Env 均为空)。")
+        else:
+            self.logger.info(f"🔍 使用 Config 文件代理: {proxies_to_use}")
+
+        try:
+            test_url = "https://www.google.com"
+            requests.get(test_url, proxies=proxies_to_use, timeout=5)
+            self.logger.info("✅ Google 连通性测试通过")
+        except Exception as e:
+            self.logger.error(f"❌ Google 连通性测试失败: {e}")
+            return
+
+        try:
+            self.logger.info("📡 正在尝试直接连接币安合约接口 (fapi.binance.com)...")
+            requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", proxies=proxies_to_use, timeout=10)
+            self.logger.info("✅ 币安连通性测试通过！(网络没问题)")
+        except Exception as e:
+            self.logger.error(f"❌ 币安连通性测试失败: {e}")
 
     def _watchdog_loop(self):
         self.logger.info("🐕 看门狗线程已启动 (超时阈值: 60秒)")
@@ -111,7 +217,6 @@ class BinanceTradingBot:
         except Exception as e:
             self.logger.error(f"飞书报警发送失败: {e}")
 
-    # 辅助函数：处理数量精度
     def amount_to_precision(self, symbol, amount):
         try:
             return self.exchange.amount_to_precision(symbol, amount)
@@ -121,8 +226,6 @@ class BinanceTradingBot:
     def get_positions_and_prices(self):
         t_start = time.time() 
         try:
-            # 获取所有持仓
-            # balance = self.exchange.fetch_balance() # 备用方案
             raw_positions = self.exchange.fetch_positions()
             
             api_duration = time.time() - t_start
@@ -133,42 +236,29 @@ class BinanceTradingBot:
             
             for pos in raw_positions:
                 symbol = pos['symbol']
-                
-                # 兼容不同版本的 ccxt 和 API 返回结构
-                # 币安合约通常在 info 里有 positionAmt, positionSide, entryPrice, markPrice
                 info = pos['info']
+                # 兼容不同版本的返回结构
                 raw_size = float(info.get('positionAmt', pos.get('contracts', 0)))
                 
                 if raw_size == 0:
                     continue
 
-                # 关键：判断持仓方向（支持双向持仓）
-                # positionSide: 'LONG', 'SHORT', 'BOTH'(单向)
                 pos_side_raw = info.get('positionSide', 'BOTH')
-                
-                # 标准化 side 为 LONG/SHORT 用于逻辑判断
                 if pos_side_raw == 'LONG':
                     logic_side = 'LONG'
                 elif pos_side_raw == 'SHORT':
                     logic_side = 'SHORT'
                 else:
-                    # 单向模式下通过数量正负判断
                     logic_side = 'LONG' if raw_size > 0 else 'SHORT'
 
                 entry_price = float(pos.get('entryPrice', info.get('entryPrice', 0)))
-                # 优先使用 markPrice 计算盈亏
+                # 优先使用 markPrice
                 current_price = float(pos.get('markPrice', info.get('markPrice', 0)))
                 unrealized_pnl = float(pos.get('unrealizedPnl', info.get('unrealizedPnl', 0)))
 
                 if entry_price == 0 or current_price == 0:
                     continue
 
-                # 计算收益率 (使用未结盈亏 / 保证金)
-                # 注意：这里我们重新计算一下基于 entryPrice 的涨跌幅作为参考，
-                # 或者直接使用交易所返回的 unrealizedPnl。
-                # 为了策略统一，这里沿用 Hyperliquid 的逻辑：(Unrealized PnL / Margin) * 100
-                # 但币安 Margin 计算较复杂（涉及杠杆），这里简化为：(盈亏 / (名义价值/杠杆))
-                
                 notional = abs(raw_size) * entry_price
                 margin = notional / self.leverage
                 
@@ -179,22 +269,21 @@ class BinanceTradingBot:
 
                 active_positions.append({
                     "symbol": symbol,
-                    "side": logic_side,           # 逻辑方向: LONG/SHORT
-                    "pos_side_api": pos_side_raw, # API原生方向: LONG/SHORT/BOTH (下单用)
-                    "size": abs(raw_size),        # 绝对值数量
-                    "raw_size": raw_size,         # 原始数量（带正负）
+                    "side": logic_side,
+                    "pos_side_api": pos_side_raw, 
+                    "size": abs(raw_size),
+                    "raw_size": raw_size,
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "profit_pct": profit_pct,
                     "pnl_usdc": unrealized_pnl,
-                    "unique_key": f"{symbol}_{pos_side_raw}" # 唯一标识符
+                    "unique_key": f"{symbol}_{pos_side_raw}"
                 })
                 
             return active_positions
             
         except Exception as e:
-            self.logger.error(f"❌ 获取数据失败 (保持状态): {e}")
-            return None 
+            raise e 
 
     def close_position(self, pos_info, size_to_close, reason="", is_partial=False, current_profit_pct=0.0):
         symbol = pos_info['symbol']
@@ -203,9 +292,7 @@ class BinanceTradingBot:
         unique_key = pos_info['unique_key']
 
         try:
-            # 1. 精度处理
             amount_str = self.amount_to_precision(symbol, size_to_close)
-            # ccxt create_order 需要 float 或 数字字符串，部分交易所对字符串支持更好
             amount_float = float(amount_str)
             
             if amount_float <= 0:
@@ -215,16 +302,14 @@ class BinanceTradingBot:
             action_type = "部分减仓" if is_partial else "全仓止盈/损"
             self.logger.info(f"正在执行 {symbol} {action_type}: 数量 {amount_str}, 方向 {logic_side} ({reason})")
             
-            # 2. 确定交易方向 (Side)
-            # 平多 -> SELL, 平空 -> BUY
             trade_side = 'sell' if logic_side == 'LONG' else 'buy'
             
-            # 3. 构建参数 (ReduceOnly & PositionSide)
-            params = {'reduceOnly': True}
+            params = {}
             if pos_side_api in ['LONG', 'SHORT']:
                 params['positionSide'] = pos_side_api
+            else:
+                params['reduceOnly'] = True
             
-            # 4. 执行下单
             order = self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -237,13 +322,10 @@ class BinanceTradingBot:
             self.logger.info(msg)
             self.send_feishu_alert(msg)
             
-            # 5. 状态管理
             if is_partial:
-                # 部分平仓：重置该持仓的最高收益记录，防止连续触发
                 self.trailing_states[unique_key] = current_profit_pct
                 self.logger.info(f"🔄 {symbol} 剩余仓位状态重置，以当前收益 ({current_profit_pct:.2f}%) 为基准继续监控")
             else:
-                # 全平：删除状态
                 if unique_key in self.trailing_states:
                     del self.trailing_states[unique_key]
                 
@@ -262,6 +344,7 @@ class BinanceTradingBot:
             self.watchdog_started = True
 
         idle_count = 0
+        error_streak = 0
         
         while True:
             self.last_heartbeat = time.time()
@@ -270,13 +353,16 @@ class BinanceTradingBot:
             try:
                 positions = self.get_positions_and_prices()
                 
+                if positions is not None:
+                    error_streak = 0
+                
                 if positions is None:
-                    self.logger.warning("⚠️ 数据获取失败，暂停判断 (状态已保护)")
+                    pass
                     
                 elif not positions:
                     self.trailing_states.clear()
-                    if idle_count % 15 == 0:
-                        self.logger.info(f"💓 监控运行中... 当前无持仓 (等待新开仓)")
+                    if idle_count % 30 == 0: 
+                        self.logger.info(f"💓 监控运行中... 当前无持仓")
                     idle_count += 1
                 
                 else:
@@ -290,7 +376,6 @@ class BinanceTradingBot:
                         if symbol in self.blacklist:
                             continue
 
-                        # 初始化或更新最高收益
                         if unique_key not in self.trailing_states:
                             self.trailing_states[unique_key] = profit_pct
                         else:
@@ -299,7 +384,7 @@ class BinanceTradingBot:
                         
                         highest_profit = self.trailing_states[unique_key]
 
-                        # --- 档位与比例判断逻辑 (与 Hyperliquid 版本一致) ---
+                        # --- 策略逻辑 ---
                         current_tier = "未达标"
                         trigger_msg = ""
                         ratio = 0.0
@@ -325,22 +410,18 @@ class BinanceTradingBot:
                                 ratio = self.low_trail_close_ratio
                                 trigger_msg = f"触发低收益保护 (最高: {highest_profit:.2f}%)"
                         
-                        # 硬止损检查
+                        # 硬止损
                         if not trigger_msg and profit_pct <= -self.stop_loss_pct:
                             ratio = self.hard_stop_close_ratio
                             trigger_msg = f"触发硬止损 (当前: {profit_pct:.2f}%)"
                             current_tier = "硬止损"
                             
-                        # --- 执行平仓逻辑 ---
                         if trigger_msg and ratio > 0:
-                            # 1. 计算数量
                             size_to_close = total_size * ratio
-                            
-                            # 2. 判断是否部分平仓 (预留 5% 容差防止碎股)
                             is_partial = (ratio < 0.99) and ((total_size - size_to_close) > (total_size * 0.05))
                             
                             if not is_partial:
-                                size_to_close = total_size # 确保全平时不留尾巴
+                                size_to_close = total_size
 
                             self.close_position(
                                 pos, 
@@ -349,12 +430,24 @@ class BinanceTradingBot:
                                 is_partial=is_partial, 
                                 current_profit_pct=profit_pct
                             )
-                            continue # 处理完跳过日志打印
+                            continue 
                             
                         self.logger.info(f"监控中: {symbol} | 方向: {pos['side']} | 盈亏: {profit_pct:.2f}% | 最高: {highest_profit:.2f}% | 档位: {current_tier}")
 
+            except ccxt.DDoSProtection as e:
+                self.logger.error(f"🛑 触发 DDoS 保护: {e}")
+                time.sleep(120)
+            except ccxt.RateLimitExceeded as e:
+                self.logger.error(f"🛑 触发 API 限流: {e}")
+                time.sleep(60)
             except Exception as e:
-                self.logger.error(f"监控循环发生错误: {e}")
+                error_streak += 1
+                self.logger.error(f"❌ 监控错误 (连续第{error_streak}次): {e}")
+                
+                if error_streak >= 5:
+                    self.logger.warning("🛑 连续错误过多，短时休眠 10s ...")
+                    time.sleep(10)
+                    error_streak = 0
             
             self.last_heartbeat = time.time()
 
@@ -378,7 +471,15 @@ if __name__ == '__main__':
             bot_config = all_config['binance']
             feishu_url = all_config.get('feishu_webhook')
             
-            bot = BinanceTradingBot(bot_config, feishu_webhook=feishu_url)
+            # ✅ 读取 config.json 最外层的 monitor_interval，默认 4
+            interval = all_config.get('monitor_interval', 4)
+            print(f"⏱️ 监控轮询间隔已设置为: {interval} 秒")
+            
+            # ✅ 尝试将 config 中的 proxies (如果存在) 传递给 bot
+            if 'proxies' in all_config:
+                bot_config['proxies'] = all_config['proxies']
+            
+            bot = BinanceTradingBot(bot_config, feishu_webhook=feishu_url, monitor_interval=interval)
             bot.trail()
         else:
             print("❌ 致命错误: config.json 中找不到 'binance' 配置块")
